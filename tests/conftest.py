@@ -34,7 +34,7 @@ def _reset_global_state():
         "aging_min_tier":      config.DEFAULT_AGING_MIN_TIER,
         "tier_rules":          config.DEFAULT_TIER_RULES,
         "namespace_patterns":  list(config.DEFAULT_NAMESPACE_PATTERNS),
-        "dashboard_sa_pattern": config.DASHBOARD_SA_PATTERN,
+        "managed_sa_patterns": list(config.MANAGED_SA_PATTERNS),
     })
     yield
     state.is_leader = False

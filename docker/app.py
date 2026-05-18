@@ -44,7 +44,7 @@ if __name__ == "__main__":
         log(f"    Tier {rule['tier']} [{mt}{extra}] "
             f"{rule['pattern']} ({rule.get('description', '')})")
     log(f"  취소 상태 목록: {sorted(CANCEL_STATUSES)}")
-    log(f"  Dashboard SA 패턴: {cfg['dashboard_sa_pattern']}")
+    log(f"  관리 SA 패턴: {cfg['managed_sa_patterns']}")
     log(f"  Leader Election: Lease={LEASE_NAMESPACE}/{LEASE_NAME}, "
         f"Duration={LEASE_DURATION_SEC}s, RetryPeriod=2s")
 

@@ -6,7 +6,8 @@ spec:
   namespacePatterns:
     - "*-cicd"
   maxPipelines: 10
-  dashboardSAPattern: "system:serviceaccount:tekton-pipelines:tekton-dashboard"
+  managedSAPatterns:
+    - "system:serviceaccount:tekton-pipelines:tekton-dashboard"
   agingIntervalSec: 300
   agingMinTier: 1
   tierRules:

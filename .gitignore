@@ -17,3 +17,10 @@ venv/
 
 # ── 테스트 전용 Dockerfile ────────────────────────
 Dockerfile.test
+
+# ── 문헌 ──────────────────────────────
+nonmoon/
+
+# ── 실험 결과 데이터 ───────────────────
+tests/kind_test_results.json
+result-exp-a.csv

@@ -6,7 +6,7 @@ from src.config import (
     determine_tier, is_target_namespace, load_crd_config, get_cached_config,
     DEFAULT_LIMIT, DEFAULT_TIER, DEFAULT_TIER_RULES,
     DEFAULT_AGING_INTERVAL_SEC, DEFAULT_AGING_MIN_TIER,
-    DASHBOARD_SA_PATTERN,
+    MANAGED_SA_PATTERNS,
 )
 
 
@@ -26,8 +26,8 @@ class TestDefaults:
     def test_default_aging_min_tier(self):
         assert DEFAULT_AGING_MIN_TIER == 1
 
-    def test_default_dashboard_sa(self):
-        assert "tekton-dashboard" in DASHBOARD_SA_PATTERN
+    def test_default_managed_sa(self):
+        assert any("tekton-dashboard" in p for p in MANAGED_SA_PATTERNS)
 
     def test_default_tier_rules_order(self):
         tiers = [r['tier'] for r in DEFAULT_TIER_RULES]
@@ -126,7 +126,7 @@ class TestLoadCrdConfig:
                 'agingIntervalSec': 300,
                 'agingMinTier': 2,
                 'namespacePatterns': ['prod-*', '*-cicd'],
-                'dashboardSAPattern': 'system:sa:custom',
+                'managedSAPatterns': ['system:sa:custom'],
             }
         }
         result = load_crd_config()
@@ -136,7 +136,7 @@ class TestLoadCrdConfig:
         assert cfg['aging_interval_sec'] == 300
         assert cfg['aging_min_tier'] == 2
         assert cfg['namespace_patterns'] == ['prod-*', '*-cicd']
-        assert cfg['dashboard_sa_pattern'] == 'system:sa:custom'
+        assert cfg['managed_sa_patterns'] == ['system:sa:custom']
 
     @patch('src.config.api')
     def test_missing_optional_fields_uses_defaults(self, mock_api):
@@ -203,3 +203,23 @@ class TestLoadCrdConfig:
         for t in threads: t.start()
         for t in threads: t.join()
         assert errors == []
+
+    @patch('src.config.api')
+    def test_null_managed_sa_patterns_uses_env_default(self, mock_api):
+        """managedSAPatterns가 null이면 환경변수 기본값을 사용한다."""
+        mock_api.get_cluster_custom_object.return_value = {
+            'spec': {'maxPipelines': 5, 'managedSAPatterns': None}
+        }
+        load_crd_config()
+        cfg = get_cached_config()
+        assert any("tekton-dashboard" in p for p in cfg['managed_sa_patterns'])
+
+    @patch('src.config.api')
+    def test_null_namespace_patterns_uses_defaults(self, mock_api):
+        """namespacePatterns가 null이면 기본값('*-cicd')을 사용한다."""
+        mock_api.get_cluster_custom_object.return_value = {
+            'spec': {'maxPipelines': 5, 'namespacePatterns': None}
+        }
+        load_crd_config()
+        cfg = get_cached_config()
+        assert cfg['namespace_patterns'] == ['*-cicd']

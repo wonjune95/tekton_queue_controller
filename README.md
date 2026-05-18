@@ -281,7 +281,7 @@ kubectl exec -n tekton-pipelines <pod-name> -- curl -sk https://localhost:8443/h
 | `spec.agingIntervalSec` | `integer` | ❌ | 180 | 에이징 승격 주기 (초) |
 | `spec.agingMinTier` | `integer` | ❌ | 1 | 에이징으로 도달 가능한 최소 Tier |
 | `spec.tierRules` | `object[]` | ❌ | 기본 규칙 | 티어 분류 규칙 배열 |
-| `spec.dashboardSAPattern` | `string` | ❌ | env var 또는 `system:serviceaccount:tekton-pipelines:tekton-dashboard` | 실행 허용 출처 SA 패턴 (fnmatch 문법) |
+| `spec.managedSAPatterns` | `string[]` | ❌ | env var 또는 `["system:serviceaccount:tekton-pipelines:tekton-dashboard"]` | 큐가 관리하는 SA 패턴 목록 (fnmatch 문법) |
 
 ### 8.2. 환경변수
 
@@ -290,7 +290,7 @@ kubectl exec -n tekton-pipelines <pod-name> -- curl -sk https://localhost:8443/h
 | `POD_NAME` | `controller-{PID}` | Pod 이름 (Leader Election용, Downward API로 주입) |
 | `POD_NAMESPACE` | `tekton-pipelines` | Pod 네임스페이스 (Lease 생성 위치) |
 | `LEASE_NAME` | `tekton-queue-controller-leader` | Leader Election Lease 리소스 이름 |
-| `DASHBOARD_SA_PATTERN` | `system:serviceaccount:tekton-pipelines:tekton-dashboard` | 실행 허용 출처 SA 패턴 (fnmatch 문법) |
+| `MANAGED_SA_PATTERNS` | `system:serviceaccount:tekton-pipelines:tekton-dashboard` | 큐가 관리하는 SA 패턴 (기본값 단일 패턴, CRD에서 배열로 확장 가능) |
 
 ### 8.3. 엔드포인트
 
@@ -471,4 +471,4 @@ tekton_queue_controller/
 - **`webhook_admitted_count` 정합성:** Webhook 통과 후 PipelineRun 생성 자체가 실패하면 카운터가 일시적으로 높게 유지됩니다. Watcher 전체 재동기화 시 리셋되어 최종 정합성이 보장됩니다.
 - **CRD 변경 반영 지연:** GlobalLimit CRD 변경 시 최대 5초의 반영 지연이 있습니다.
 - **HA Failover 지연:** Leader 장애 시 최대 ~15초의 스케줄링 공백이 발생합니다. 이 동안 Webhook은 모든 Pod에서 정상 처리됩니다.
-- **Dashboard SA 패턴 변경 시 재배포 필요:** `DASHBOARD_SA_PATTERN` 환경변수 변경은 Pod 재시작이 필요합니다.
+- **관리 SA 패턴 변경 시 재배포 필요:** `MANAGED_SA_PATTERNS` 환경변수 변경은 Pod 재시작이 필요합니다. SA 패턴 추가는 `spec.managedSAPatterns` 배열에 항목을 추가하면 재배포 없이 반영됩니다.

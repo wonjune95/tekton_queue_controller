@@ -5,7 +5,7 @@ IMAGE_NAME   ?= tekton-queue-controller
 IMAGE_TAG    ?= local
 CLUSTER_NAME ?= tekton-test
 
-.PHONY: build load deploy test lint clean help
+.PHONY: build load deploy test simulate kind-setup kind-test lint clean help
 
 ## Docker 이미지 빌드
 build:
@@ -28,6 +28,41 @@ all: load deploy
 ## pytest 단위 테스트
 test:
 	python -m pytest tests/ -v
+
+## S1~S4 스케줄링 시뮬레이션 (K8s 불필요)
+simulate:
+	python -m tests.simulate_scenarios
+
+## Kind 로컬 클러스터 구성 (Tekton + 컨트롤러 배포)
+kind-setup:
+	bash scripts/kind_setup.sh
+
+## Kind 클러스터에서 S3 Burst 시나리오 재현 (24개 PipelineRun 생성)
+kind-test:
+	@echo ">>> S3 Burst: 24개 PipelineRun 생성 (test-cicd 네임스페이스)"
+	@kubectl create namespace test-cicd 2>/dev/null || true
+	@for i in $$(seq 1 24); do \
+		kubectl create -n test-cicd -f - <<EOF \
+		  2>/dev/null & \
+apiVersion: tekton.dev/v1 \
+kind: PipelineRun \
+metadata: \
+  generateName: burst-pr- \
+  labels: \
+    env: dev \
+spec: \
+  pipelineSpec: \
+    tasks: \
+    - name: sleep \
+      taskSpec: \
+        steps: \
+        - name: sleep \
+          image: alpine \
+          command: [sh, -c, "sleep 30"] \
+EOF \
+	done; wait
+	@echo ">>> 생성 완료. 상태 확인:"
+	@kubectl get pipelineruns -n test-cicd | head -30
 
 ## 코드 lint (flake8)
 lint:

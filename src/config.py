@@ -38,11 +38,10 @@ CANCEL_STATUSES = frozenset({
     'StoppedRunFinally',
 })
 
-# Dashboard SA만 큐를 통한 실행을 허용합니다.
-DASHBOARD_SA_PATTERN = os.environ.get(
-    "DASHBOARD_SA_PATTERN",
+MANAGED_SA_PATTERNS = [os.environ.get(
+    "MANAGED_SA_PATTERNS",
     "system:serviceaccount:tekton-pipelines:tekton-dashboard"
-)
+)]
 
 # ─── Leader Election 상수 ─────────────────────────────────────
 LEASE_NAME             = os.environ.get("LEASE_NAME", "tekton-queue-controller-leader")
@@ -58,7 +57,7 @@ crd_config: dict = {
     "aging_min_tier":      DEFAULT_AGING_MIN_TIER,
     "tier_rules":          DEFAULT_TIER_RULES,
     "namespace_patterns":  list(DEFAULT_NAMESPACE_PATTERNS),
-    "dashboard_sa_pattern": DASHBOARD_SA_PATTERN,
+    "managed_sa_patterns": list(MANAGED_SA_PATTERNS),
 }
 crd_config_lock = threading.Lock()
 
@@ -92,7 +91,7 @@ def load_crd_config() -> int:
             "aging_min_tier":      int(spec.get('agingMinTier', DEFAULT_AGING_MIN_TIER)),
             "tier_rules":          spec.get('tierRules') or DEFAULT_TIER_RULES,
             "namespace_patterns":  resolved_patterns,
-            "dashboard_sa_pattern": spec.get('dashboardSAPattern') or DASHBOARD_SA_PATTERN,
+            "managed_sa_patterns": spec.get('managedSAPatterns') or list(MANAGED_SA_PATTERNS),
         }
         with crd_config_lock:
             crd_config.update(new_cfg)

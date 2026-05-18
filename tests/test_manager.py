@@ -127,3 +127,139 @@ class TestManagerScheduling:
         except InterruptedError:
             pass
         assert mock_api.patch_namespaced_custom_object.call_count == 1
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# 3) admitted 카운터와 슬롯 계산 통합
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+class TestManagerAdmittedCounter:
+    @patch('src.workers.manager.time.sleep', side_effect=[None, InterruptedError])
+    @patch('src.workers.manager.load_crd_config', return_value=3)
+    @patch('src.workers.manager.api')
+    @patch('src.cache.core_api')
+    def test_admitted_reduces_available_slots(self, mock_cache_api, mock_api, mock_crd, mock_sleep):
+        """running(1) + admitted(2) = limit(3) → 가용 슬롯 없어 스케줄링 안 함."""
+        state.is_leader = True
+        cm = MagicMock()
+        cm.data = {'admitted': '2'}
+        mock_cache_api.read_namespaced_config_map.return_value = cm
+        cache.local_cache["test-cicd/r1"] = make_pr(name="r1")
+        cache.local_cache["test-cicd/p1"] = make_pr(
+            name="p1", spec_status="PipelineRunPending", tier=2, managed=True)
+        try:
+            manager_loop()
+        except InterruptedError:
+            pass
+        mock_api.patch_namespaced_custom_object.assert_not_called()
+
+    @patch('src.workers.manager.time.sleep', side_effect=[None, InterruptedError])
+    @patch('src.workers.manager.load_crd_config', return_value=5)
+    @patch('src.workers.manager.api')
+    @patch('src.cache.core_api')
+    def test_admitted_partial_blocks_extra_slots(self, mock_cache_api, mock_api, mock_crd, mock_sleep):
+        """running(1) + admitted(2) = 3, limit=5 → 슬롯 2개만 스케줄링한다."""
+        state.is_leader = True
+        cm = MagicMock()
+        cm.data = {'admitted': '2'}
+        mock_cache_api.read_namespaced_config_map.return_value = cm
+        cache.local_cache["test-cicd/r1"] = make_pr(name="r1")
+        for i in range(5):
+            cache.local_cache[f"test-cicd/p{i}"] = make_pr(
+                name=f"p{i}", spec_status="PipelineRunPending", tier=2, managed=True)
+        try:
+            manager_loop()
+        except InterruptedError:
+            pass
+        assert mock_api.patch_namespaced_custom_object.call_count == 2
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# 4) 스케줄링 후 로컬 캐시 업데이트
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+class TestManagerCacheUpdate:
+    @patch('src.workers.manager.time.sleep', side_effect=[None, InterruptedError])
+    @patch('src.workers.manager.load_crd_config', return_value=10)
+    @patch('src.workers.manager.api')
+    @patch('src.cache.core_api')
+    def test_cache_updated_after_scheduling(self, mock_cache_api, mock_api, mock_crd, mock_sleep):
+        """스케줄링 성공 후 로컬 캐시의 spec.status가 None으로 갱신된다."""
+        state.is_leader = True
+        cm = MagicMock()
+        cm.data = {'admitted': '0'}
+        mock_cache_api.read_namespaced_config_map.return_value = cm
+        cache.local_cache["test-cicd/p1"] = make_pr(
+            name="p1", spec_status="PipelineRunPending", tier=2, managed=True)
+        try:
+            manager_loop()
+        except InterruptedError:
+            pass
+        assert cache.local_cache["test-cicd/p1"]['spec']['status'] is None
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# 5) 우선순위 기반 스케줄링 순서
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+class TestManagerSchedulingPriority:
+    @patch('src.workers.manager.time.sleep', side_effect=[None, InterruptedError])
+    @patch('src.workers.manager.load_crd_config', return_value=2)
+    @patch('src.workers.manager.api')
+    @patch('src.cache.core_api')
+    def test_higher_tier_scheduled_first(self, mock_cache_api, mock_api, mock_crd, mock_sleep):
+        """슬롯 1개일 때 Tier 1이 Tier 3보다 먼저 스케줄링된다."""
+        state.is_leader = True
+        cm = MagicMock()
+        cm.data = {'admitted': '0'}
+        mock_cache_api.read_namespaced_config_map.return_value = cm
+        import datetime as _dt
+        now = _dt.datetime.now(_dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        cache.local_cache["test-cicd/r1"] = make_pr(name="r1")  # running=1, slot=1
+        cache.local_cache["test-cicd/low"] = make_pr(
+            name="low", spec_status="PipelineRunPending", tier=3, managed=True, creation_ts=now)
+        cache.local_cache["test-cicd/high"] = make_pr(
+            name="high", spec_status="PipelineRunPending", tier=1, managed=True, creation_ts=now)
+        try:
+            manager_loop()
+        except InterruptedError:
+            pass
+        calls = mock_api.patch_namespaced_custom_object.call_args_list
+        assert len(calls) == 1
+        assert calls[0][0][4] == 'high'
+
+    @patch('src.workers.manager.time.sleep', side_effect=[None, InterruptedError])
+    @patch('src.workers.manager.load_crd_config', return_value=10)
+    @patch('src.workers.manager.api')
+    @patch('src.cache.core_api')
+    def test_fifo_within_same_tier(self, mock_cache_api, mock_api, mock_crd, mock_sleep):
+        """같은 Tier 내에서는 먼저 생성된 PR이 먼저 스케줄링된다."""
+        state.is_leader = True
+        cm = MagicMock()
+        cm.data = {'admitted': '0'}
+        mock_cache_api.read_namespaced_config_map.return_value = cm
+        cache.local_cache["test-cicd/old"] = make_pr(
+            name="old", spec_status="PipelineRunPending", tier=2, managed=True,
+            creation_ts="2025-01-01T00:00:00Z")
+        cache.local_cache["test-cicd/new"] = make_pr(
+            name="new", spec_status="PipelineRunPending", tier=2, managed=True,
+            creation_ts="2025-01-01T01:00:00Z")
+        try:
+            manager_loop()
+        except InterruptedError:
+            pass
+        calls = mock_api.patch_namespaced_custom_object.call_args_list
+        assert calls[0][0][4] == 'old'
+        assert calls[1][0][4] == 'new'
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# 6) 일반 예외 처리
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+class TestManagerGenericException:
+    @patch('src.workers.manager.time.sleep', side_effect=[None, InterruptedError])
+    @patch('src.workers.manager.load_crd_config', side_effect=RuntimeError("unexpected error"))
+    def test_generic_exception_no_crash(self, mock_crd, mock_sleep):
+        """CRD 로드 중 일반 예외가 발생해도 Manager 루프가 크래시하지 않는다."""
+        state.is_leader = True
+        try:
+            manager_loop()
+        except InterruptedError:
+            pass

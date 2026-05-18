@@ -85,13 +85,13 @@ def mutate_pipelinerun():
     pr_name           = metadata.get('name') or metadata.get('generateName', 'unknown') + "(gen)"
     ptype             = labels.get('type', '?')
 
-    is_from_dashboard = fnmatch.fnmatch(username, cfg["dashboard_sa_pattern"])
+    is_managed = any(fnmatch.fnmatch(username, p) for p in cfg["managed_sa_patterns"])
 
-    # Dashboard 외 출처 → Pending 설정 (스케줄링 제외)
-    if not is_from_dashboard:
+    # 관리 대상 외 출처 → Pending 설정 (스케줄링 제외)
+    if not is_managed:
         m.METRIC_WEBHOOK_HELD.labels(tier=str(tier_val)).inc()
         log(f"[Webhook 보류] {namespace}/{pr_name} ({ptype}, Tier {tier_val}) "
-            f"-> Dashboard 외 출처 ({username}). Pending 설정 (스케줄링 제외).")
+            f"-> 관리 대상 외 출처 ({username}). Pending 설정 (스케줄링 제외).")
         patch = [{"op": "add", "path": "/spec/status", "value": "PipelineRunPending"}]
         if not metadata.get("labels"):
             patch.append({"op": "add", "path": "/metadata/labels",

@@ -242,3 +242,101 @@ class TestMutateSpecialCases:
         tier_key = config.TIER_LABEL_KEY.replace("/", "~1")
         tier_patches = [p for p in patches if tier_key in p.get('path', '')]
         assert tier_patches[0]['value'] == '0'
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# 7) 응답 UID 일치
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+class TestMutateResponseUID:
+    @patch('src.cache.core_api')
+    def test_admitted_response_uid_matches(self, mock_api, flask_client):
+        """즉시 실행 응답의 UID가 요청 UID와 일치한다."""
+        state.initial_sync_done = True
+        cm = MagicMock()
+        cm.data = {'admitted': '0'}
+        mock_api.read_namespaced_config_map.return_value = cm
+        req = make_admission_request()
+        req['request']['uid'] = 'specific-uid-abc123'
+        resp = flask_client.post('/mutate', json=req, content_type='application/json')
+        assert resp.get_json()['response']['uid'] == 'specific-uid-abc123'
+
+    def test_non_target_ns_uid_matches(self, flask_client):
+        """비대상 NS 응답도 요청 UID를 그대로 반환한다."""
+        req = make_admission_request(namespace="other-ns")
+        req['request']['uid'] = 'uid-non-target-xyz'
+        resp = flask_client.post('/mutate', json=req, content_type='application/json')
+        assert resp.get_json()['response']['uid'] == 'uid-non-target-xyz'
+
+    def test_hold_response_uid_matches(self, flask_client):
+        """보류(HOLD) 응답도 요청 UID를 그대로 반환한다."""
+        state.initial_sync_done = True
+        req = make_admission_request(username="system:serviceaccount:default:bastion")
+        req['request']['uid'] = 'uid-hold-789'
+        resp = flask_client.post('/mutate', json=req, content_type='application/json')
+        assert resp.get_json()['response']['uid'] == 'uid-hold-789'
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# 8) managedSAPatterns 와일드카드
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+class TestManagedSAPatternsFnmatch:
+    @patch('src.cache.core_api')
+    def test_wildcard_pattern_matches_dashboard(self, mock_api, flask_client):
+        """'system:serviceaccount:tekton-pipelines:*' 패턴이 tekton-dashboard에 매칭된다."""
+        state.initial_sync_done = True
+        config.crd_config['managed_sa_patterns'] = ['system:serviceaccount:tekton-pipelines:*']
+        cm = MagicMock()
+        cm.data = {'admitted': '0'}
+        mock_api.read_namespaced_config_map.return_value = cm
+        req = make_admission_request(
+            username="system:serviceaccount:tekton-pipelines:tekton-dashboard")
+        resp = flask_client.post('/mutate', json=req, content_type='application/json')
+        patches = _decode_patch(resp.data)
+        assert not any(p.get('value') == 'PipelineRunPending' for p in (patches or []))
+
+    def test_wildcard_pattern_excludes_other_namespace(self, flask_client):
+        """다른 네임스페이스의 SA는 와일드카드 패턴에 매칭되지 않아 보류 처리된다."""
+        state.initial_sync_done = True
+        config.crd_config['managed_sa_patterns'] = ['system:serviceaccount:tekton-pipelines:*']
+        req = make_admission_request(
+            username="system:serviceaccount:default:some-user")
+        resp = flask_client.post('/mutate', json=req, content_type='application/json')
+        patches = _decode_patch(resp.data)
+        assert any(p.get('value') == 'PipelineRunPending' for p in (patches or []))
+
+    @patch('src.cache.core_api')
+    def test_multiple_sa_patterns(self, mock_api, flask_client):
+        """여러 SA 패턴 중 하나라도 매칭되면 관리 대상으로 처리된다."""
+        state.initial_sync_done = True
+        config.crd_config['managed_sa_patterns'] = [
+            'system:serviceaccount:tekton-pipelines:tekton-dashboard',
+            'system:serviceaccount:ci:ci-runner',
+        ]
+        cm = MagicMock()
+        cm.data = {'admitted': '0'}
+        mock_api.read_namespaced_config_map.return_value = cm
+        req = make_admission_request(
+            username="system:serviceaccount:ci:ci-runner")
+        resp = flask_client.post('/mutate', json=req, content_type='application/json')
+        patches = _decode_patch(resp.data)
+        assert not any(p.get('value') == 'PipelineRunPending' for p in (patches or []))
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# 9) generateName + 쿼터 초과 조합
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+class TestMutateGenerateNameQueued:
+    @patch('src.cache.core_api')
+    def test_generatename_queued_gets_pending_and_managed(self, mock_api, flask_client):
+        """generateName PR이 쿼터 초과 시 Pending + managed 라벨이 모두 적용된다."""
+        state.initial_sync_done = True
+        config.crd_config['max_pipelines'] = 0
+        cm = MagicMock()
+        cm.data = {'admitted': '0'}
+        mock_api.read_namespaced_config_map.return_value = cm
+        req = make_admission_request(name=None, generate_name="build-", labels={"env": "dev"})
+        resp = flask_client.post('/mutate', json=req, content_type='application/json')
+        patches = _decode_patch(resp.data)
+        assert any(p.get('value') == 'PipelineRunPending' for p in patches)
+        managed_key = config.MANAGED_LABEL_KEY.replace("/", "~1")
+        assert any(managed_key in p.get('path', '') for p in patches)
