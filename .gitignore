@@ -10,6 +10,7 @@ __pycache__/
 venv/
 
 # ── IDE / 에디터 ──────────────────────────────────
+.gitignore
 .claude/
 .vscode/
 .idea/
