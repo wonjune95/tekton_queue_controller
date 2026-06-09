@@ -10,6 +10,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY src/ ./src/
 COPY docker/app.py .
+COPY docker/gunicorn.conf.py .
 
 RUN useradd -u 1001 appuser \
     && chown -R appuser:appuser /app
@@ -19,4 +20,4 @@ USER 1001
 EXPOSE 8443
 EXPOSE 9090
 
-CMD ["python", "app.py"]
+CMD ["gunicorn", "-c", "gunicorn.conf.py", "src.webhook:app"]
