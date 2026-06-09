@@ -330,22 +330,33 @@ scrape_configs:
 
 ### 10.1. Dockerfile 구조
 
-이미지는 `docker/Dockerfile`에 정의되어 있으며, **Python 3.11-slim** 기반으로 빌드됩니다.
+이미지는 `docker/Dockerfile`에 정의되어 있으며, **Python 3.11-slim** 기반으로 빌드됩니다. WSGI 서버로 **Gunicorn**을 사용합니다.
 
 ```
 python:3.11-slim (Base)
   └─ /app
-       ├── requirements.txt   ← pip 의존성 설치
-       ├── src/                ← 비즈니스 로직 모듈
-       └── app.py              ← 엔트리포인트
+       ├── requirements.txt    ← pip 의존성 설치
+       ├── src/                 ← 비즈니스 로직 모듈
+       ├── app.py               ← 로컬 개발용 엔트리포인트 (python app.py)
+       └── gunicorn.conf.py     ← Gunicorn 설정 (프로덕션 서버)
 ```
 
 | 레이어 | 설명 |
 |--------|------|
 | `COPY requirements.txt` → `pip install` | 의존성만 먼저 설치하여 Docker 캐시 최적화 |
-| `COPY src/`, `COPY app.py` | 소스 코드 복사 |
+| `COPY src/`, `COPY app.py`, `COPY gunicorn.conf.py` | 소스 코드 및 서버 설정 복사 |
 | `useradd -u 1001 appuser` | 보안을 위한 비루트 사용자 실행 |
 | `EXPOSE 8443 / 9090` | Webhook(HTTPS) 및 Prometheus 메트릭 포트 |
+| `CMD gunicorn -c gunicorn.conf.py src.webhook:app` | Gunicorn으로 Flask 앱 구동 |
+
+**Gunicorn 설정 (`docker/gunicorn.conf.py`):**
+
+| 항목 | 값 | 이유 |
+|------|-----|------|
+| `workers` | 1 | leader/manager/watcher 스레드가 in-memory 캐시를 공유하므로 멀티 프로세스 불가 |
+| `worker_class` | gthread | 스레드 기반 동시 요청 처리 (Flask `threaded=True`와 동일한 모델) |
+| `threads` | 8 | 동시 Webhook 요청 처리 |
+| `timeout` | 120 | K8s Webhook 타임아웃(최대 30초)보다 길게 설정하여 worker 불필요 재시작 방지 |
 
 ### 10.2. 이미지 빌드 (수동)
 
@@ -435,8 +446,9 @@ tekton_queue_controller/
 ├── Makefile                # 빌드 및 배포, 자동화 명령어
 ├── docker/
 │   ├── Dockerfile          # 컨테이너 이미지 빌드 스크립트 (Python 3.11+)
-│   ├── app.py              # 메인 엔트리포인트 (Slim Wrapper)
-│   └── requirements.txt    # Python 의존성 (Flask, Kubernetes 등)
+│   ├── app.py              # 로컬 개발용 엔트리포인트 (python app.py)
+│   ├── gunicorn.conf.py    # Gunicorn 프로덕션 서버 설정
+│   └── requirements.txt    # Python 의존성 (Flask, Gunicorn, Kubernetes 등)
 ├── src/                    # 비즈니스 로직(Backend 모듈)
 │   ├── __init__.py
 │   ├── state.py            # Global 공유 상태 자원
