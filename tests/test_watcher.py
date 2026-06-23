@@ -175,30 +175,25 @@ class TestWatcherStreamEvents:
     @patch('src.workers.watcher.time.sleep', side_effect=[None, InterruptedError])
     @patch('src.workers.watcher.api')
     @patch('src.workers.watcher._reset_global_admitted')
-    def test_generic_exception_triggers_resync(self, mock_reset, mock_api, mock_sleep, mock_watch):
-        """스트림 중 일반 예외 발생 시 resource_version이 초기화되어 전체 재동기화된다."""
+    def test_generic_exception_preserves_resource_version(self, mock_reset, mock_api, mock_sleep, mock_watch):
+        """스트림 중 일반 예외 발생 시 resource_version을 보존하여 전체 재동기화를 하지 않는다."""
         from src.workers.watcher import watcher_loop
-        call_count = [0]
+        resp = MagicMock()
+        resp.data = json.dumps({'metadata': {'resourceVersion': '100'}, 'items': []}).encode()
+        mock_api.list_cluster_custom_object.return_value = resp
 
-        def fake_list(*args, **kwargs):
-            call_count[0] += 1
-            if call_count[0] >= 2:
-                raise InterruptedError("stop")
-            resp = MagicMock()
-            resp.data = json.dumps(
-                {'metadata': {'resourceVersion': '100'}, 'items': []}
-            ).encode()
-            return resp
-
-        mock_api.list_cluster_custom_object.side_effect = fake_list
         w_instance = MagicMock()
         mock_watch.Watch.return_value = w_instance
-        w_instance.stream.side_effect = Exception("stream broken")
+        # 첫 번째 stream: 일반 예외 / 두 번째: InterruptedError로 탈출
+        w_instance.stream.side_effect = [Exception("stream broken"), InterruptedError("done")]
         try:
             watcher_loop()
         except InterruptedError:
             pass
-        assert call_count[0] >= 2
+        # 전체 재동기화(list)가 최초 1회만 호출 → resource_version 보존 확인
+        assert mock_api.list_cluster_custom_object.call_count == 1
+        # admitted 카운터 리셋은 최초 동기화 1회만
+        assert mock_reset.call_count == 1
 
     @patch('src.workers.watcher.watch')
     @patch('src.workers.watcher.time.sleep', side_effect=[None, InterruptedError])

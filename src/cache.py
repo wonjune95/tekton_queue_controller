@@ -104,7 +104,8 @@ def _try_increment_global_admitted(running_cnt: int, limit: int, max_retries: in
 
 def _decrement_global_admitted(max_retries: int = 5):
     global webhook_admitted_count
-    for _ in range(max_retries):
+    import time as _time
+    for attempt in range(max_retries):
         try:
             cm = core_api.read_namespaced_config_map(ADMITTED_CM_NAME, LEASE_NAMESPACE)
             admitted = int(cm.data.get('admitted', '0'))
@@ -115,15 +116,18 @@ def _decrement_global_admitted(max_retries: int = 5):
             return
         except ApiException as e:
             if e.status == 409:
-                continue
+                continue  # 낙관적 락 충돌: 즉시 재시도
             elif e.status == 404:
                 return
             else:
-                log(f"[AdmittedCM] ConfigMap 감소 실패 (API {e.status}). per-pod fallback 사용.")
-                break
+                log(f"[AdmittedCM] ConfigMap 감소 실패 (API {e.status}, 시도 {attempt+1}/{max_retries}). 재시도 중...")
+                _time.sleep(0.1)
+                continue
         except Exception as e:
-            log(f"[AdmittedCM] ConfigMap 감소 실패 ({e}). per-pod fallback 사용.")
-            break
+            log(f"[AdmittedCM] ConfigMap 감소 실패 ({e}, 시도 {attempt+1}/{max_retries}). 재시도 중...")
+            _time.sleep(0.1)
+            continue
+    log("[AdmittedCM] ConfigMap 감소 최대 재시도 초과. 카운터는 다음 Watcher 재동기화 시 자동 교정됩니다.")
     with admitted_lock:
         webhook_admitted_count = max(0, webhook_admitted_count - 1)
 

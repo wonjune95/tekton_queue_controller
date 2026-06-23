@@ -89,8 +89,8 @@ class TestLeaderElection:
     @patch('src.workers.leader.time.sleep', side_effect=[None, InterruptedError])
     @patch('src.workers.leader.k8s_client.CoordinationV1Api')
     @patch('src.workers.leader.POD_NAME', 'my-pod')
-    def test_409_conflict_on_renewal_keeps_leader(self, MockCoord, mock_sleep):
-        """갱신 시 409 Conflict → 리더 상태 유지."""
+    def test_409_conflict_on_renewal_releases_leader(self, MockCoord, mock_sleep):
+        """갱신 시 409 Conflict → 다른 Pod가 Lease를 탈취한 것으로 판정, 리더 해제."""
         from src.workers.leader import leader_election_loop
         coord = MockCoord.return_value
         lease = _make_lease(holder="my-pod",
@@ -102,7 +102,7 @@ class TestLeaderElection:
             leader_election_loop()
         except InterruptedError:
             pass
-        assert state.is_leader is True  # 갱신 충돌이지만 유지
+        assert state.is_leader is False  # 갱신 충돌 시 즉시 리더 해제
 
     @patch('src.workers.leader.time.sleep', side_effect=[None, InterruptedError])
     @patch('src.workers.leader.k8s_client.CoordinationV1Api')

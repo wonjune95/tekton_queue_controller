@@ -123,14 +123,18 @@ def determine_tier(labels: dict, tier_rules: list) -> int:
     for rule in tier_rules:
         match_type = rule.get('matchType', 'env')
         pattern    = rule.get('pattern', '')
-        if match_type == 'label':
-            label_val = labels.get(rule.get('labelKey', ''), '')
-            if label_val and fnmatch.fnmatch(label_val, pattern):
-                return int(rule.get('tier', DEFAULT_TIER))
-        elif match_type == 'env':
-            env_val = labels.get(ENV_LABEL_KEY, '')
-            if fnmatch.fnmatch(env_val, pattern):
-                return int(rule.get('tier', DEFAULT_TIER))
+        try:
+            if match_type == 'label':
+                label_val = labels.get(rule.get('labelKey', ''), '')
+                if label_val and fnmatch.fnmatch(label_val, pattern):
+                    return int(rule.get('tier', DEFAULT_TIER))
+            elif match_type == 'env':
+                env_val = labels.get(ENV_LABEL_KEY, '')
+                if fnmatch.fnmatch(env_val, pattern):
+                    return int(rule.get('tier', DEFAULT_TIER))
+        except (ValueError, TypeError):
+            _log(f"[경고] tierRules 설정 오류 (tier 값 정수 변환 불가): {rule}. DEFAULT_TIER({DEFAULT_TIER}) 사용.")
+            return DEFAULT_TIER
     return DEFAULT_TIER
 
 

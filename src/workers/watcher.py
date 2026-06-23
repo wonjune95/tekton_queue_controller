@@ -62,10 +62,9 @@ def watcher_loop():
                 log("[Watcher] resourceVersion 만료 (410 Gone). 전체 재동기화를 수행합니다.")
                 resource_version = None
             else:
-                log(f"[Watcher] API 에러 ({e.status}): {e.reason}. 재연결 시도 중...")
+                log(f"[Watcher] API 에러 ({e.status}): {e.reason}. resource_version 보존 후 재연결 시도 중...")
             time.sleep(2)
         except Exception as e:
             m.METRIC_API_ERRORS.labels(operation='watch_pipelinerun_stream').inc()
-            log(f"[Watcher] 스트림 끊김, 재연결 시도 중... ({e})")
-            resource_version = None
+            log(f"[Watcher] 스트림 끊김, resource_version 보존 후 재연결 시도 중... ({e})")
             time.sleep(2)

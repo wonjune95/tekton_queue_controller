@@ -115,9 +115,10 @@ def _complete(name, delay_sec):
 
 def _schedule_once(scheduled_at_map, exec_sec):
     """1회 스케줄링: 가용 슬롯만큼 Pending → Running 전환."""
+    from src.cache import _get_global_admitted
     l_max = cfg.crd_config["max_pipelines"]
     running, pending = get_queue_status_from_cache()
-    available = l_max - running
+    available = l_max - (running + _get_global_admitted())
     now = _now()
     for target in pending[:max(0, available)]:
         name = target['metadata']['name']

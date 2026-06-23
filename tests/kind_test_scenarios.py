@@ -4,10 +4,10 @@ Kind 클러스터 S1~S4 실험 테스트.
 kubectl로 PipelineRun을 생성하고 status.startTime - creationTimestamp 로 대기 시간을 측정한다.
 실행: python -m tests.kind_test_scenarios
 """
-import subprocess, json, time, datetime, sys
+import subprocess, json, time, datetime, sys, os
 from collections import defaultdict
 
-CONTEXT = "kind-tekton-test"
+CONTEXT = os.environ.get("KUBE_CONTEXT", "kind-tekton-test")
 NS      = "test-cicd"
 
 # ── kubectl 래퍼 ────────────────────────────────────────────────
@@ -262,10 +262,36 @@ def run_s2(results):
     for i, (_, name, tier) in enumerate(schedule_order):
         print(f"    {i+1}. {name} Tier{tier}")
 
-    tier1_pos = [i+1 for i, (_, n, t) in enumerate(schedule_order) if t == 1]
-    tier3_pos = [i+1 for i, (_, n, t) in enumerate(schedule_order) if t == 3]
-    priority_ok = (tier1_pos and tier3_pos and max(tier1_pos) < min(tier3_pos))
-    print(f"\n  우선순위 검증: [{'OK - Tier1이 Tier3보다 먼저 스케줄됨' if priority_ok else 'NG - 역전 발생'}]")
+    # 우선순위 검증 (비선점 semantics):
+    # 컨트롤러는 이미 실행 중인 PR을 선점(preempt)하지 않는다. 따라서 빈 슬롯을
+    # 먼저 점유한 PR은 우선순위와 무관하게 끝까지 실행된다. 진짜 역전이란
+    # "어떤 Tier3가 시작되는 시점에, 이미 생성되어 대기 중(미시작)인 Tier1이
+    # 존재함에도 그 Tier3가 먼저 스케줄된 경우"이다. 즉 큐에서 경쟁한 건들만 대상.
+    def _created(pr):
+        return _parse_ts(pr["metadata"].get("creationTimestamp"))
+    def _started(pr):
+        return _parse_ts(pr["status"].get("startTime"))
+
+    violations = []
+    for n3, pr3 in pr_map.items():
+        if tier_map.get(n3) != 3:
+            continue
+        s3 = _started(pr3)
+        if not s3:
+            continue
+        for n1, pr1 in pr_map.items():
+            if tier_map.get(n1) != 1:
+                continue
+            c1, s1 = _created(pr1), _started(pr1)
+            # Tier1이 s3 이전에 생성되어 대기 중인데, Tier3가 그 Tier1보다 먼저 시작 → 역전
+            if c1 and s1 and c1 < s3 < s1:
+                violations.append((n3, n1))
+    priority_ok = not violations
+    if priority_ok:
+        print(f"\n  우선순위 검증: [OK - 대기열에서 경쟁한 Tier1이 Tier3보다 먼저 스케줄됨 "
+              f"(비선점: 초기 점유 Tier3는 우선순위 경쟁 대상 아님)]")
+    else:
+        print(f"\n  우선순위 검증: [NG - 역전 발생: {violations}]")
 
     metrics, peak, done, stuck = print_metrics("S2", pr_map, tier_map, L_MAX, EXEC)
     results["S2"] = {"metrics": metrics, "peak": peak, "done": done,

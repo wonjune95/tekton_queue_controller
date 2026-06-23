@@ -42,7 +42,10 @@ kubectl get lease tekton-queue-controller-leader -n tekton-pipelines -o yaml
 
 # 2. admitted ConfigMap 확인
 kubectl get configmap tekton-queue-admitted-count -n tekton-pipelines -o yaml
-# admitted 값이 비정상적으로 높으면 수동 리셋:
+# 참고: admitted 누수는 Manager의 self-healing이 자동 보정한다.
+#   - running=0 인데 admitted>0  (또는)  pending 적체 & 슬롯=0 & admitted>0
+#   - 위 상태가 30초 이상 지속되면 카운터를 0으로 자동 리셋 (로그: "[Manager] admitted 쿼터 누수 감지")
+# 30초를 기다릴 수 없는 긴급 상황에서만 수동 리셋:
 kubectl patch configmap tekton-queue-admitted-count -n tekton-pipelines \
   --type merge -p '{"data":{"admitted":"0"}}'
 

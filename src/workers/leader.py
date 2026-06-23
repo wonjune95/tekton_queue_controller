@@ -85,12 +85,12 @@ def leader_election_loop():
             m.METRIC_API_ERRORS.labels(operation='leader_election').inc()
             if e.status == 409:
                 if _is_renewal_attempt:
-                    log("[LeaderElection] Lease 갱신 충돌 (409). is_leader 유지 후 재시도.")
+                    log("[LeaderElection] Lease 갱신 충돌 (409). 다른 Pod가 Lease를 탈취한 것으로 판정, Leader 해제.")
                 else:
                     log("[LeaderElection] Lease 탈취 충돌 (409). Leader 상태 해제.")
-                    with state.leader_lock:
-                        if state.is_leader:
-                            state.is_leader = False
+                with state.leader_lock:
+                    if state.is_leader:
+                        state.is_leader = False
             else:
                 log(f"[LeaderElection] API 에러 ({e.status}): {e.reason}")
         except Exception as e:

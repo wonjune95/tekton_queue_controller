@@ -15,7 +15,7 @@ from src.config import (
     load_crd_config, get_cached_config, log, api,
 )
 from src.cache import (
-    get_queue_status_from_cache, _get_global_admitted,
+    get_queue_status_from_cache, _get_global_admitted, _reset_global_admitted,
     local_cache, cache_lock, parse_k8s_timestamp,
 )
 from src import metrics as m
@@ -57,15 +57,23 @@ def print_dashboard(limit: int, running_cnt: int, pending_list: list, cfg: dict)
     log("=" * 60)
 
 
+# admitted 쿼터 누수 자가 치유(self-healing) 임계 시간(초).
+# 실행 중 PR이 0개인데 admitted 카운터가 계속 양수로 남아있는 비정상 상태가
+# 이 시간 이상 지속되면 카운터를 0으로 강제 보정한다.
+ADMITTED_LEAK_HEAL_SEC = 30
+
+
 def manager_loop():
     log("[Manager] 스레드 시작 (스케줄링 주기: 5초)")
     last_log_time = 0
+    admitted_leak_since = None  # running==0 & admitted>0 비정상 상태 시작 시각
 
     while True:
         try:
             with state.leader_lock:
                 currently_leader = state.is_leader
             if not currently_leader:
+                admitted_leak_since = None  # Leader 아닐 땐 추적 초기화
                 time.sleep(5)
                 continue
 
@@ -88,8 +96,39 @@ def manager_loop():
             for t_val, count in pending_by_tier.items():
                 m.METRIC_QUEUE_PENDING.labels(tier=str(t_val)).set(count)
 
-            effective_running = running + _get_global_admitted()
+            global_admitted   = _get_global_admitted()
+            effective_running = running + global_admitted
             available_slots   = limit - effective_running
+
+            # ── admitted 쿼터 누수 자가 치유 ──────────────────────────
+            # admitted 카운터는 in-flight admission(보통 2초 내 running 전환)을
+            # 나타내므로 정상 상태에선 빠르게 0으로 수렴한다. 감산 완전 실패 등으로
+            # 카운터가 붕 뜬 채 고착되면 슬롯이 영구 낭비/차단된다.
+            # 두 가지 누수 징후를 OR로 잡되, in-flight 오탐을 막기 위해
+            # ADMITTED_LEAK_HEAL_SEC 이상 지속될 때만 카운터를 0으로 보정한다.
+            #   (1) idle 선제 청소: running=0 인데 admitted>0 (다음 신규 요청의
+            #       유령 대기 방지 — 한가한 시점에 미리 청소)
+            #   (2) starvation 구제: pending 작업이 있고 슬롯이 0 이하인데 admitted>0
+            #       (부분 누수가 누적되어 실행 중 PR이 있어도 스케줄링이 막힌 경우)
+            leak_suspected = (
+                (running == 0 and global_admitted > 0) or
+                (pending and available_slots <= 0 and global_admitted > 0)
+            )
+            if leak_suspected:
+                now_ts = time.time()
+                if admitted_leak_since is None:
+                    admitted_leak_since = now_ts
+                elif now_ts - admitted_leak_since >= ADMITTED_LEAK_HEAL_SEC:
+                    log(f"[Manager] admitted 쿼터 누수 감지 (running={running}, "
+                        f"admitted={global_admitted}, pending={len(pending)}, "
+                        f"{int(now_ts - admitted_leak_since)}s 지속). 카운터를 0으로 자가 보정합니다.")
+                    _reset_global_admitted()
+                    admitted_leak_since = None
+                    global_admitted     = 0
+                    effective_running   = running
+                    available_slots     = limit - running
+            else:
+                admitted_leak_since = None
 
             if available_slots > 0 and pending:
                 scheduled = 0
@@ -121,8 +160,10 @@ def manager_loop():
                     except ApiException as e:
                         m.METRIC_API_ERRORS.labels(operation='patch_pipelinerun').inc()
                         log(f"[에러] 실행 패치 실패 ({t_ns}/{t_name}): API 에러 {e.status} - {e.reason}")
+                        continue
                     except Exception as e:
                         log(f"[에러] 실행 패치 실패 ({t_ns}/{t_name}): {e}")
+                        continue
         except Exception as e:
             log(f"[에러] Manager 루프 에러: {e}")
         time.sleep(5)
