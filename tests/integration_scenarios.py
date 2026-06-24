@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """
-Kind 클러스터 S1~S4 실험 테스트.
+S1~S4 통합 시나리오 테스트 (docker-desktop Kubernetes).
 kubectl로 PipelineRun을 생성하고 status.startTime - creationTimestamp 로 대기 시간을 측정한다.
-실행: python -m tests.kind_test_scenarios
+실행: python -m tests.integration_scenarios   # 기본 컨텍스트: docker-desktop
 """
 import subprocess, json, time, datetime, sys, os
 from collections import defaultdict
 
-CONTEXT = os.environ.get("KUBE_CONTEXT", "kind-tekton-test")
+CONTEXT = os.environ.get("KUBE_CONTEXT", "docker-desktop")
 NS      = "test-cicd"
 
 # ── kubectl 래퍼 ────────────────────────────────────────────────
@@ -390,7 +390,7 @@ if __name__ == "__main__":
     print("\n[완료] GlobalLimit 원복 완료.")
 
     # 결과 요약 저장
-    with open("tests/kind_test_results.json", "w", encoding="utf-8") as f:
+    with open("tests/integration_results.json", "w", encoding="utf-8") as f:
         # datetime 직렬화 처리
         def _serial(obj):
             if isinstance(obj, datetime.datetime):
@@ -398,5 +398,5 @@ if __name__ == "__main__":
             raise TypeError(str(type(obj)))
         json.dump(results, f, ensure_ascii=False, indent=2, default=_serial)
 
-    print(f"\n결과 저장: tests/kind_test_results.json")
+    print(f"\n결과 저장: tests/integration_results.json")
     print("='='*29")

@@ -22,5 +22,5 @@ Dockerfile.test
 nonmoon/
 
 # ── 실험 결과 데이터 ──────────────────────────────
-tests/kind_test_results.json
+tests/integration_results.json
 result-exp-a.csv

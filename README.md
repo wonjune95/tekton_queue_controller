@@ -15,6 +15,19 @@
 
 ---
 
+## 🚀 Quick Start
+
+Kind 로컬 클러스터에 Tekton과 컨트롤러를 배포하고, 버스트 시나리오로 큐 동작을 곧바로 확인할 수 있습니다. (`kind`, `kubectl`, `docker` 필요)
+
+```bash
+make kind-setup   # Kind 클러스터 생성 + Tekton + 컨트롤러 자동 배포
+make kind-test    # PipelineRun 24개 버스트 생성 → 큐 적체·소진 관찰
+```
+
+> 프로덕션 배포(TLS 인증서·HA 구성)는 [§7 설치 및 배포](#7-설치-및-배포)를, 전체 동작 원리는 [§2 워크플로우](#2-워크플로우)를 참고하세요.
+
+---
+
 ## 📑 목차
 
 | | 섹션 | | 섹션 |
@@ -174,6 +187,17 @@ sequenceDiagram
 | **취소/중지 처리** | `Cancelled`, `CancelledRunFinally`, `StoppedRunFinally` 상태 감지 | 취소된 파이프라인의 슬롯 즉시 반환 |
 | **Race Condition 방어** | `webhook_admitted_count`로 Webhook-Watcher 간 정합성 유지 | 동시 CREATE 시 쿼터 초과 방지 |
 | **고가용성** | Kubernetes Lease 기반 Leader Election | Leader 장애 시 ~15초 내 자동 Failover |
+
+### 💡 핵심 설계 결정 (Key Design Decisions)
+
+외부 의존성을 늘리지 않고 **Kubernetes 네이티브 프리미티브만으로** 분산 정합성·고가용성을 달성한 것이 이 컨트롤러의 핵심 설계입니다.
+
+| 문제 | 선택한 설계 | 대안 대비 이점 |
+|------|-------------|----------------|
+| 다중 Pod 간 전역 쿼터 정합성 | ConfigMap + `resourceVersion` 낙관적 락 + phantom 엔트리 | Redis 등 외부 분산 락 스토리지 불필요 → 인프라 의존성 0 ([§12](#12-admitted-카운터--자가-치유-self-healing)) |
+| 쿼터 초과 PR 처리 | Admission 단계에서 `PipelineRunPending` 주입 | PR 강제 삭제/재생성 없는 비파괴적 제어 |
+| 카운터 누수 복구 | Manager 루프 OR-게이트 자가 치유 | 운영자 개입 없이 30초 내 자동 보정 ([§12.2](#122-자가-치유-self-healing)) |
+| 고가용성 | K8s Lease 기반 Leader Election | ZooKeeper 등 외부 코디네이터 직접 운영 불필요 |
 
 ---
 
@@ -442,37 +466,23 @@ docker images | grep tekton-queue-controller
 # tekton-queue-controller   local   abc123def456   10 seconds ago   185MB
 ```
 
-### 10.3. 이미지 태깅
-
-배포 환경에 맞게 태그를 지정합니다.
+<details>
+<summary><b>10.3. 이미지 태깅 &amp; 레지스트리 Push</b> (표준 Docker 절차 — 펼치기)</summary>
 
 ```bash
-# 버전 태그
-docker tag tekton-queue-controller:local tekton-queue-controller:v1.0.0
-
-# 프라이빗 레지스트리 태그
+# 버전 / 레지스트리 태그 지정
 docker tag tekton-queue-controller:local <REGISTRY_HOST>/tekton-queue-controller:v1.0.0
 
-# 예시: Harbor 레지스트리
-docker tag tekton-queue-controller:local harbor.example.com/devops/tekton-queue-controller:v1.0.0
-```
-
-### 10.4. 레지스트리에 Push
-
-```bash
-# 레지스트리 로그인
+# 로그인 후 푸시
 docker login <REGISTRY_HOST>
-
-# 이미지 푸시
 docker push <REGISTRY_HOST>/tekton-queue-controller:v1.0.0
-
-# 예시: Harbor
-docker push harbor.example.com/devops/tekton-queue-controller:v1.0.0
 ```
 
 > **참고:** `install/deploy.yaml`의 `spec.containers[].image` 값을 푸시한 이미지 경로로 변경해야 합니다.
 
-### 10.5. Kind 로컬 클러스터에 로드
+</details>
+
+### 10.4. Kind 로컬 클러스터에 로드
 
 프라이빗 레지스트리 없이 로컬 Kind 클러스터에서 테스트하려면 이미지를 직접 로드합니다.
 
@@ -481,7 +491,7 @@ docker push harbor.example.com/devops/tekton-queue-controller:v1.0.0
 kind load docker-image tekton-queue-controller:local --name tekton-test
 ```
 
-### 10.6. Makefile 단축 명령
+### 10.5. Makefile 단축 명령
 
 위 과정을 Makefile로 간편하게 실행할 수 있습니다.
 
@@ -606,8 +616,8 @@ make test     # python -m pytest tests/ -v
 > **S2 우선순위 참고:** 컨트롤러는 비선점형이므로 t=0에 빈 슬롯을 먼저 점유한 Tier3는 끝까지 실행됩니다. 우선순위는 **대기열에서 경쟁한 건**에만 적용되며, 실측 결과 대기 24s의 Tier1이 대기 63~74s의 Tier3보다 먼저 스케줄되어 정책이 정확히 동작함을 확인했습니다.
 
 ```bash
-# 통합 시나리오 재현 (KUBE_CONTEXT로 컨텍스트 지정)
-KUBE_CONTEXT=docker-desktop python -m tests.kind_test_scenarios
+# 통합 시나리오 재현 (기본 컨텍스트: docker-desktop, KUBE_CONTEXT로 변경 가능)
+python -m tests.integration_scenarios
 ```
 
 ---
