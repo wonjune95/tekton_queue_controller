@@ -2,7 +2,6 @@
 Prometheus 메트릭 모듈.
 
 컨트롤러 전반에서 사용하는 모든 Gauge/Counter 객체를 여기서 정의합니다.
-(docker/app.py L76~L83 발췌)
 """
 from prometheus_client import Gauge, Counter
 

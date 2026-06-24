@@ -3,7 +3,6 @@
 
 모든 상수, 환경변수 로드, CRD 기반 설정 로드,
 Kubernetes 클라이언트 초기화를 담당합니다.
-(docker/app.py L1~L74, L128~L161 발췌)
 """
 import os
 import fnmatch
@@ -98,10 +97,10 @@ def load_crd_config() -> int:
         return new_cfg["max_pipelines"]
     except ApiException as e:
         m.METRIC_API_ERRORS.labels(operation='get_crd').inc()
-        _log(f"[경고] GlobalLimit CRD 조회 실패 (API 에러 {e.status}): {e.reason}. 기본값 사용.")
+        log(f"[경고] GlobalLimit CRD 조회 실패 (API 에러 {e.status}): {e.reason}. 기본값 사용.")
         return DEFAULT_LIMIT
     except Exception as e:
-        _log(f"[경고] GlobalLimit CRD 조회 실패: {e}. 기본값 사용.")
+        log(f"[경고] GlobalLimit CRD 조회 실패: {e}. 기본값 사용.")
         return DEFAULT_LIMIT
 
 
@@ -133,15 +132,22 @@ def determine_tier(labels: dict, tier_rules: list) -> int:
                 if fnmatch.fnmatch(env_val, pattern):
                     return int(rule.get('tier', DEFAULT_TIER))
         except (ValueError, TypeError):
-            _log(f"[경고] tierRules 설정 오류 (tier 값 정수 변환 불가): {rule}. DEFAULT_TIER({DEFAULT_TIER}) 사용.")
+            log(f"[경고] tierRules 설정 오류 (tier 값 정수 변환 불가): {rule}. DEFAULT_TIER({DEFAULT_TIER}) 사용.")
             return DEFAULT_TIER
     return DEFAULT_TIER
+
+
+def effective_tier(tier: int, wait_seconds: float,
+                   aging_interval: int, aging_min: int) -> int:
+    """대기 시간에 따른 aging 보정을 적용한 유효 Tier를 계산합니다."""
+    aging_bonus = int(wait_seconds // aging_interval) if aging_interval > 0 else 0
+    return min(tier, max(aging_min, tier - aging_bonus))
 
 
 # ─── 로깅 ─────────────────────────────────────────────────────
 import datetime
 
-def _log(msg: str) -> None:
+def log(msg: str) -> None:
     """타임스탬프가 포함된 구조화 로그를 출력합니다."""
     now  = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     line = f"[{now}] {msg}"
@@ -149,7 +155,3 @@ def _log(msg: str) -> None:
         print(line, flush=True)
     except UnicodeEncodeError:
         print(line.encode('utf-8', errors='replace').decode('utf-8'), flush=True)
-
-
-# 외부 모듈에서 공통으로 사용할 log 함수
-log = _log

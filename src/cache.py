@@ -2,7 +2,6 @@
 캐시 및 admitted 카운터 모듈.
 
 PipelineRun 인메모리 캐시와 HA 환경의 cross-pod admitted 카운터를 관리합니다.
-(docker/app.py L44~L60, L164~L408 발췌)
 """
 import threading
 import datetime
@@ -15,7 +14,7 @@ from src.config import (
     MANAGED_LABEL_KEY, MANAGED_LABEL_VAL, TIER_LABEL_KEY,
     ENV_LABEL_KEY, CANCEL_STATUSES, DEFAULT_TIER,
     LEASE_NAMESPACE, get_cached_config, DEFAULT_NAMESPACE_PATTERNS,
-    log, core_api,
+    log, core_api, effective_tier,
 )
 from src import metrics as m
 
@@ -234,9 +233,8 @@ def get_queue_status_from_cache():
             tier = DEFAULT_TIER
         created_at   = parse_k8s_timestamp(item['metadata'].get('creationTimestamp', ''))
         wait_seconds = (now_utc - created_at).total_seconds()
-        aging_bonus  = int(wait_seconds // aging_interval) if aging_interval > 0 else 0
-        effective_tier = min(tier, max(aging_min, tier - aging_bonus))
-        return (effective_tier, item['metadata'].get('creationTimestamp', ''))
+        eff_tier     = effective_tier(tier, wait_seconds, aging_interval, aging_min)
+        return (eff_tier, item['metadata'].get('creationTimestamp', ''))
 
     managed_pending_list.sort(key=_sort_key)
     return running_cnt, managed_pending_list

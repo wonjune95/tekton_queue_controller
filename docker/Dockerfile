@@ -9,7 +9,6 @@ COPY docker/requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 COPY src/ ./src/
-COPY docker/app.py .
 COPY docker/gunicorn.conf.py .
 
 RUN useradd -u 1001 appuser \

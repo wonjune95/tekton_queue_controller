@@ -3,7 +3,6 @@ Manager(스케줄링) 루프 모듈.
 
 5초 주기로 대기열을 확인하고, 가용 슬롯만큼 Pending PR을 Running으로 전환합니다.
 리더 Pod에서만 실행됩니다.
-(docker/app.py L677~L748 발췌)
 """
 import time
 import datetime
@@ -12,7 +11,7 @@ from kubernetes.client.rest import ApiException
 
 from src.config import (
     TIER_LABEL_KEY, ENV_LABEL_KEY, DEFAULT_TIER,
-    load_crd_config, get_cached_config, log, api,
+    load_crd_config, get_cached_config, log, api, effective_tier,
 )
 from src.cache import (
     get_queue_status_from_cache, _get_global_admitted, _reset_global_admitted,
@@ -43,16 +42,14 @@ def print_dashboard(limit: int, running_cnt: int, pending_list: list, cfg: dict)
             orig_tier  = labels.get(TIER_LABEL_KEY, str(DEFAULT_TIER))
             created_at = parse_k8s_timestamp(item['metadata'].get('creationTimestamp', ''))
             wait_secs  = (now_utc - created_at).total_seconds()
-            aging_bonus = int(wait_secs // aging_interval) if aging_interval > 0 else 0
             wait_disp  = f"{int(wait_secs)}s" if wait_secs < 120 else f"{int(wait_secs//60)}m"
             ptype      = labels.get('type', '?')
             env_val    = labels.get(ENV_LABEL_KEY, '?')
             try:
-                tier_int       = int(orig_tier)
-                effective_tier = min(tier_int, max(aging_min, tier_int - aging_bonus))
+                eff_tier = effective_tier(int(orig_tier), wait_secs, aging_interval, aging_min)
             except ValueError:
-                effective_tier = aging_min
-            log(f"   {idx+1}. [Tier {orig_tier}->{effective_tier}] "
+                eff_tier = aging_min
+            log(f"   {idx+1}. [Tier {orig_tier}->{eff_tier}] "
                 f"{ns}/{name} ({ptype}/{env_val}, 대기: {wait_disp})")
     log("=" * 60)
 
@@ -81,7 +78,9 @@ def manager_loop():
             cfg            = get_cached_config()
             running, pending = get_queue_status_from_cache()
 
-            if pending or abs(time.time() - last_log_time) > 60:
+            # 로그 폭주 방지: pending이 있어도 30초마다(유휴 시 60초마다)만 대시보드 출력
+            elapsed = time.time() - last_log_time
+            if (pending and elapsed > 30) or elapsed > 60:
                 print_dashboard(limit, running, pending, cfg)
                 last_log_time = time.time()
 

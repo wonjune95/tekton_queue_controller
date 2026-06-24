@@ -3,7 +3,6 @@ Watcher 루프 모듈.
 
 K8s Watch API로 PipelineRun 이벤트를 실시간으로 수신해
 in-memory 캐시를 동기화합니다.
-(docker/app.py L751~L799 발췌)
 """
 import json
 import time

@@ -2,7 +2,6 @@
 Webhook 모듈.
 
 Flask 앱과 /mutate, /healthz, /readyz 라우트를 정의합니다.
-(docker/app.py L92, L410~L592 발췌)
 """
 import json
 import base64
@@ -57,11 +56,7 @@ def mutate_pipelinerun():
     request_info = request.get_json(silent=True)
     if not request_info:
         log("[경고] Webhook 요청 파싱 실패. 통과 처리.")
-        return jsonify({
-            "apiVersion": "admission.k8s.io/v1",
-            "kind": "AdmissionReview",
-            "response": {"uid": "", "allowed": True}
-        })
+        return _allow("")
 
     uid       = request_info.get("request", {}).get("uid", "")
     req_obj   = request_info.get("request", {}).get("object", {})
@@ -72,16 +67,10 @@ def mutate_pipelinerun():
 
     # 대상 네임스페이스가 아니면 그냥 통과
     if not is_target_namespace(namespace):
-        return jsonify({
-            "apiVersion": "admission.k8s.io/v1",
-            "kind": "AdmissionReview",
-            "response": {"uid": uid, "allowed": True}
-        })
+        return _allow(uid)
 
     cfg               = get_cached_config()
     tier_val          = determine_tier(labels, cfg["tier_rules"])
-    tier_label_escaped    = TIER_LABEL_KEY.replace("/", "~1")
-    managed_label_escaped = MANAGED_LABEL_KEY.replace("/", "~1")
     pr_name           = metadata.get('name') or metadata.get('generateName', 'unknown') + "(gen)"
     ptype             = labels.get('type', '?')
 
@@ -93,23 +82,13 @@ def mutate_pipelinerun():
         log(f"[Webhook 보류] {namespace}/{pr_name} ({ptype}, Tier {tier_val}) "
             f"-> 관리 대상 외 출처 ({username}). Pending 설정 (스케줄링 제외).")
         patch = [{"op": "add", "path": "/spec/status", "value": "PipelineRunPending"}]
-        if not metadata.get("labels"):
-            patch.append({"op": "add", "path": "/metadata/labels",
-                          "value": {TIER_LABEL_KEY: str(tier_val)}})
-        else:
-            patch.append({"op": "add",
-                          "path": f"/metadata/labels/{tier_label_escaped}",
-                          "value": str(tier_val)})
+        patch += _label_patch(metadata.get("labels"), {TIER_LABEL_KEY: str(tier_val)})
         return _admission_patch_response(uid, patch)
 
     # 캐시 동기화 미완료 방어
     if not state.initial_sync_done:
         log(f"[경고] 캐시 미동기화 상태에서 Dashboard Webhook 요청 수신 ({namespace}). 통과 처리.")
-        return jsonify({
-            "apiVersion": "admission.k8s.io/v1",
-            "kind": "AdmissionReview",
-            "response": {"uid": uid, "allowed": True}
-        })
+        return _allow(uid)
 
     limit        = cfg["max_pipelines"]
     running_cnt, _ = get_queue_status_from_cache()
@@ -125,17 +104,8 @@ def mutate_pipelinerun():
         log(f"[Webhook 차단] {namespace}/{pr_name} ({ptype}/{match_info}, Tier {tier_val}) "
             f"-> 쿼터 초과(Running:{effective_running} >= Limit:{limit}). 대기열로 보냅니다.")
         patch = [{"op": "add", "path": "/spec/status", "value": "PipelineRunPending"}]
-        if not metadata.get("labels"):
-            patch.append({"op": "add", "path": "/metadata/labels",
-                          "value": {TIER_LABEL_KEY: str(tier_val),
-                                    MANAGED_LABEL_KEY: MANAGED_LABEL_VAL}})
-        else:
-            patch.append({"op": "add",
-                          "path": f"/metadata/labels/{tier_label_escaped}",
-                          "value": str(tier_val)})
-            patch.append({"op": "add",
-                          "path": f"/metadata/labels/{managed_label_escaped}",
-                          "value": MANAGED_LABEL_VAL})
+        patch += _label_patch(metadata.get("labels"),
+                              {TIER_LABEL_KEY: str(tier_val), MANAGED_LABEL_KEY: MANAGED_LABEL_VAL})
         return _admission_patch_response(uid, patch)
 
     # generateName PR은 이름이 확정되지 않아 phantom entry 삽입 스킵
@@ -163,15 +133,28 @@ def mutate_pipelinerun():
     log(f"[Webhook 통과] {namespace}/{pr_name} ({ptype}/{match_info}, Tier {tier_val}) "
         f"-> 즉시 실행 허용 (Running:{effective_running + 1}/{limit})")
 
-    patch = []
-    if not metadata.get("labels"):
-        patch.append({"op": "add", "path": "/metadata/labels",
-                      "value": {TIER_LABEL_KEY: str(tier_val)}})
-    else:
-        patch.append({"op": "add",
-                      "path": f"/metadata/labels/{tier_label_escaped}",
-                      "value": str(tier_val)})
+    patch = _label_patch(metadata.get("labels"), {TIER_LABEL_KEY: str(tier_val)})
     return _admission_patch_response(uid, patch)
+
+
+def _allow(uid: str):
+    """패치 없이 통과시키는 AdmissionReview 응답."""
+    return jsonify({
+        "apiVersion": "admission.k8s.io/v1",
+        "kind": "AdmissionReview",
+        "response": {"uid": uid, "allowed": True},
+    })
+
+
+def _label_patch(existing_labels: dict, new_labels: dict) -> list:
+    """라벨 추가용 JSONPatch ops 생성.
+    labels 맵이 없으면 통째로 add, 있으면 키별 escaped path로 add."""
+    if not existing_labels:
+        return [{"op": "add", "path": "/metadata/labels", "value": dict(new_labels)}]
+    return [
+        {"op": "add", "path": f"/metadata/labels/{k.replace('/', '~1')}", "value": v}
+        for k, v in new_labels.items()
+    ]
 
 
 def _admission_patch_response(uid: str, patch: list):

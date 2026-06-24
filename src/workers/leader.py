@@ -3,7 +3,6 @@ Leader Election 루프 모듈.
 
 K8s Lease 리소스를 사용해 HA 환경에서 단일 리더를 선출합니다.
 리더만 Manager 루프(스케줄링)를 실행합니다.
-(docker/app.py L595~L674 발췌)
 """
 import time
 import datetime
