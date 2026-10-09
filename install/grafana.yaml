@@ -1,0 +1,110 @@
+# Grafana — 캠페인 시계열을 논문용 화면으로 캡처하기 위한 최소 구성.
+#
+# 왜 kube-prometheus-stack 의 Grafana 를 켜지 않고 별도로 두는가:
+#   기존 kps 릴리스를 helm upgrade 하면 Prometheus·Operator 까지 재시작하면서
+#   **emptyDir 에 있는 시계열이 사라진다**(현재 Prometheus 는 PVC 없이 emptyDir).
+#   캡처 대상이 바로 그 시계열이므로, 기존 릴리스를 건드리지 않는 독립 배포로 붙인다.
+#
+# 적용 시점(중요): **실행 중인 실험이 없을 때**. 청크 사이에 적용한다.
+#   registry 노드에 고정되므로 build 노드 측정에는 영향이 없다.
+#
+#   kubectl apply -f install/grafana.yaml
+#   kubectl -n monitoring rollout status deploy/grafana
+#   kubectl -n monitoring port-forward svc/grafana 3000:3000
+#   → http://localhost:3000  (익명 접속, Admin 권한)
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: grafana-datasource
+  namespace: monitoring
+data:
+  datasource.yaml: |
+    apiVersion: 1
+    datasources:
+      - name: Prometheus
+        type: prometheus
+        uid: prometheus          # 대시보드 JSON 이 이 uid 로 참조한다
+        access: proxy
+        url: http://kps-kube-prometheus-stack-prometheus.monitoring.svc:9090
+        isDefault: true
+        editable: false
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: grafana-dashboard-provider
+  namespace: monitoring
+data:
+  provider.yaml: |
+    apiVersion: 1
+    providers:
+      - name: thesis
+        orgId: 1
+        folder: ''
+        type: file
+        disableDeletion: false
+        editable: true
+        options:
+          path: /var/lib/grafana/dashboards
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: grafana
+  namespace: monitoring
+  labels: {app: grafana}
+spec:
+  replicas: 1
+  selector:
+    matchLabels: {app: grafana}
+  template:
+    metadata:
+      labels: {app: grafana}
+    spec:
+      # 제어 계층·측정 대상과 분리: 인프라(registry) 노드에 고정한다.
+      nodeSelector:
+        infra-role: registry
+      securityContext:
+        fsGroup: 472
+        runAsUser: 472
+        runAsGroup: 472
+      containers:
+        - name: grafana
+          image: grafana/grafana:11.3.0
+          ports:
+            - {containerPort: 3000, name: http}
+          env:
+            # 포트포워드로만 접근하는 임시 UI 이므로 익명 접속을 허용한다(로그인 단계 생략).
+            - {name: GF_AUTH_ANONYMOUS_ENABLED,  value: "true"}
+            - {name: GF_AUTH_ANONYMOUS_ORG_ROLE, value: "Admin"}
+            - {name: GF_AUTH_BASIC_ENABLED,      value: "false"}
+            - {name: GF_SECURITY_ALLOW_EMBEDDING, value: "true"}
+            - {name: GF_USERS_DEFAULT_THEME,     value: "light"}
+          resources:
+            requests: {memory: 256Mi, cpu: 100m}
+            limits:   {memory: 512Mi}
+          volumeMounts:
+            - {name: datasource, mountPath: /etc/grafana/provisioning/datasources}
+            - {name: dashprovider, mountPath: /etc/grafana/provisioning/dashboards}
+            - {name: dashboards, mountPath: /var/lib/grafana/dashboards}
+            - {name: storage, mountPath: /var/lib/grafana}
+          readinessProbe:
+            httpGet: {path: /api/health, port: 3000}
+            initialDelaySeconds: 10
+      volumes:
+        - {name: datasource,   configMap: {name: grafana-datasource}}
+        - {name: dashprovider, configMap: {name: grafana-dashboard-provider}}
+        - {name: dashboards,   configMap: {name: grafana-dashboard-thesis}}
+        - {name: storage,      emptyDir: {}}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: grafana
+  namespace: monitoring
+  labels: {app: grafana}
+spec:
+  selector: {app: grafana}
+  ports:
+    - {name: http, port: 3000, targetPort: 3000}

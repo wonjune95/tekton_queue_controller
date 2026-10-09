@@ -1,0 +1,29 @@
+# V-phantom — phantom 캐시 경로 검증 (named PR)
+# 목적: A1'와 동일하게 admitted 카운터를 끈(disableAdmittedCounter=true) 채,
+#       named PR 부하를 인가한다. named 는 웹훅이 phantom 캐시를 즉시 삽입하므로
+#       카운터가 꺼져도 phantom 이 watch 지연 창의 슬롯을 메운다.
+#       → 순간 상한 초과가 발생하지 않으면(max_concurrent <= L_max) phantom 경로가 작동함을 실증.
+#
+# A1' 와의 대조 (짝 실험):
+#   - A1'(generateName, 카운터 off): phantom 없음 → 카운터가 유일 브리지 → 끄면 overshoot 발생.
+#   - V-phantom(named,      카운터 off): phantom 있음 → 유일 브리지 → 끄어도 overshoot 미발생.
+#   두 결과를 함께 제시하면 "phantom=named 브리지, 카운터=generateName 브리지"가 통제된 대조로 증명된다.
+#
+# ※ 메인 매트릭스는 generateName 으로 통일(운영 정합). 이 시나리오만 named 를 쓴다(phantom 경로 노출 목적).
+# ※ 비파괴 성격이나(상한 유지·초과 미발생 기대), disableAdmittedCounter 를 쓰므로 만일을 대비해
+#   파괴적 조건 이전, 비파괴 구간 말미에 단발로 수행한다.
+
+scenario: v_phantom_named
+namespace: default-cicd
+
+lmax: 30                          # 상한 유지
+disable_admitted_counter: true    # A1' 와 동일 — run.sh 가 CRD 패치
+
+load:
+  mode: burst
+  count: 90                       # L_max x 3
+  interval_sec: 0.33
+  env: dev
+  generate_name: false            # named PR — phantom 삽입 경로 활성 (핵심 차이)
+
+destructive: false

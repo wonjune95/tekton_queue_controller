@@ -1,0 +1,221 @@
+---
+# 논문 실험용 파이프라인 - 공개 이미지 기반
+# git-clone → maven build → kaniko push (Harbor) → trivy image scan
+# namespace: default-cicd
+apiVersion: tekton.dev/v1
+kind: Pipeline
+metadata:
+  name: petclinic-build
+  namespace: default-cicd
+spec:
+  description: |
+    Petclinic CI 실험용 파이프라인.
+    Gitea 소스 클론 → Maven 빌드(package) → Kaniko 이미지 빌드 → Harbor Push → Trivy 스캔
+  params:
+  - name: git-url
+    default: http://gitea-service.devops-tools.svc:3000/admin/spring-petclinic.git
+    type: string
+  - name: git-revision
+    default: main
+    type: string
+  - name: java-version
+    default: "17"
+    type: string
+  - name: env
+    default: dev
+    type: string
+  - name: image-tag
+    default: "latest"
+    type: string
+  workspaces:
+  - name: shared-data
+  tasks:
+  # ── 1. 소스 클론 ──────────────────────────────────────────────────
+  - name: code-fetch
+    displayName: Code Fetch
+    taskSpec:
+      params:
+      - name: url
+      - name: revision
+        default: main
+      workspaces:
+      - name: output
+      steps:
+      - name: clone
+        image: alpine/git:latest
+        script: |
+          #!/bin/sh
+          set -e
+          git clone --depth 1 \
+            --branch $(params.revision) \
+            $(params.url) \
+            $(workspaces.output.path)/src
+          cd $(workspaces.output.path)/src
+          echo "Cloned $(params.url) @ $(git log -1 --pretty='%h %s')"
+    params:
+    - name: url
+      value: $(params.git-url)
+    - name: revision
+      value: $(params.git-revision)
+    workspaces:
+    - name: output
+      workspace: shared-data
+  # ── 2. Maven 빌드 (JAR 패키지, 테스트 실행 제외) ──────────────────
+  - name: code-build
+    displayName: Code Build
+    runAfter: [code-fetch]
+    taskSpec:
+      params:
+      - name: java-version
+        default: "17"
+      workspaces:
+      - name: source
+      results:
+      - name: jar-name
+        type: string
+      volumes:
+      - name: maven-settings
+        configMap:
+          name: maven-settings
+      steps:
+      - name: mvn-package
+        image: maven:3.9-eclipse-temurin-$(params.java-version)
+        workingDir: $(workspaces.source.path)/src
+        volumeMounts:
+        - name: maven-settings
+          mountPath: /etc/maven
+        script: |
+          #!/bin/bash
+          set -e
+          mvn package \
+            -B \
+            -s /etc/maven/settings.xml \
+            -DskipTests=true \
+            -Dmaven.repo.local=/tmp/.m2
+          JAR=$(find target -name "*.jar" -not -name "*sources*" | head -1)
+          echo "Built: $JAR"
+          echo -n "$(basename $JAR)" | tee $(results.jar-name.path)
+    params:
+    - name: java-version
+      value: $(params.java-version)
+    workspaces:
+    - name: source
+      workspace: shared-data
+  # ── 3. Dockerfile 생성 ────────────────────────────────────────────
+  - name: write-dockerfile
+    displayName: Write Dockerfile
+    runAfter: [code-build]
+    taskSpec:
+      params:
+      - name: java-version
+        default: "17"
+      - name: jar-name
+      workspaces:
+      - name: source
+      steps:
+      - name: write
+        image: alpine:3.19
+        workingDir: $(workspaces.source.path)/src
+        script: |
+          #!/bin/sh
+          cat > Dockerfile <<EOF
+          FROM harbor.harbor.svc:80/library/eclipse-temurin:$(params.java-version)-jre-alpine
+          WORKDIR /app
+          COPY target/$(params.jar-name) app.jar
+          ENTRYPOINT ["java", "-jar", "app.jar"]
+          EOF
+          cat Dockerfile
+    params:
+    - name: java-version
+      value: $(params.java-version)
+    - name: jar-name
+      value: $(tasks.code-build.results.jar-name)
+    workspaces:
+    - name: source
+      workspace: shared-data
+  # ── 4. Kaniko 이미지 빌드 & Harbor Push ───────────────────────────
+  - name: image-build
+    displayName: Image Build & Push
+    runAfter: [write-dockerfile]
+    taskSpec:
+      params:
+      - name: image
+      workspaces:
+      - name: source
+      steps:
+      - name: kaniko
+        image: gcr.io/kaniko-project/executor:v1.23.2
+        args:
+        - --dockerfile=$(workspaces.source.path)/src/Dockerfile
+        - --context=$(workspaces.source.path)/src
+        - --destination=$(params.image)
+        - --skip-tls-verify
+        - --insecure
+        - --insecure-pull
+        - --compressed-caching=false
+        - --cache=false
+        env:
+        - name: DOCKER_CONFIG
+          value: /kaniko/.docker
+        volumeMounts:
+        - name: docker-config
+          mountPath: /kaniko/.docker
+      volumes:
+      - name: docker-config
+        projected:
+          sources:
+          - secret:
+              name: harbor-kaniko-config
+              items:
+              - key: config.json
+                path: config.json
+    params:
+    - name: image
+      value: harbor.harbor.svc:80/library/petclinic-$(params.env)-$(params.image-tag):build
+    workspaces:
+    - name: source
+      workspace: shared-data
+  # ── 5. Trivy 이미지 취약점 스캔 ───────────────────────────────────
+  - name: image-scan
+    displayName: Trivy Image Scan
+    runAfter: [image-build]
+    taskSpec:
+      params:
+      - name: image
+      volumes:
+      - name: harbor-auth
+        projected:
+          sources:
+          - secret:
+              name: harbor-kaniko-config
+              items:
+              - key: config.json
+                path: config.json
+      steps:
+      - name: trivy-scan
+        image: aquasec/trivy:0.57.0
+        env:
+        - name: TRIVY_DB_REPOSITORY
+          value: harbor.harbor.svc:80/library/trivy-db:2
+        - name: TRIVY_JAVA_DB_REPOSITORY
+          value: harbor.harbor.svc:80/library/trivy-java-db:1
+        - name: DOCKER_CONFIG
+          value: /harbor-auth
+        volumeMounts:
+        - name: harbor-auth
+          mountPath: /harbor-auth
+        script: |
+          #!/bin/sh
+          set -e
+          echo "Trivy 이미지 스캔: $(params.image)"
+          trivy image \
+            --exit-code 0 \
+            --severity HIGH,CRITICAL \
+            --scanners vuln \
+            --insecure \
+            --timeout 10m \
+            $(params.image)
+          echo "스캔 완료"
+    params:
+    - name: image
+      value: harbor.harbor.svc:80/library/petclinic-$(params.env)-$(params.image-tag):build

@@ -1,0 +1,26 @@
+# A2 — 에이징 제거
+# 목적: 에이징 없을 때 저우선순위 기아 발생 확인 (H3)
+# S2 피크 구간과 동일 부하, agingIntervalSec을 매우 크게 설정
+
+scenario: a2_no_aging
+base_scenario: s2_peak_hour
+ablation: no_aging
+
+namespace: default-cicd
+lmax: 30
+
+# 에이징 비활성화: agingIntervalSec을 9999로 설정
+aging_interval_sec: 9999   # 사실상 에이징 없음
+
+load:
+  phases:
+    - rate_per_min: 1
+      duration_min: 10
+    - rate_per_min: 10
+      duration_min: 10
+  repeat: 5
+
+env_distribution:
+  prod: 0.1
+  stg:  0.2
+  dev:  0.7

@@ -1,0 +1,30 @@
+# A0-NR — 컨트롤러 비활성 + requests 무설정 (요인 2x2의 (off, unset) 셀)
+# 목적: 큐 컨트롤러도 없고 파드 자원 요청량(requests)도 없는 최악 조건에서, 어드미션 계층 부재 시
+#       노드 자원 고갈(OOMKilled·NotReady) 양상을 노출한다. 제안 시스템의 자원 안정성 기여를
+#       무설정 대조로 보인다.
+#
+# ※※ 파괴적 조건(노드 OOM·NotReady 유발) ※※
+#   - CLAUDE.md 안전 규칙: 임의 실행 금지. 사용자가 명시적으로 지시한 경우에만, 캠페인 최후에 수행.
+#   - 실행 직후 노드 복구 예비 시간(예비일) 확보 전제.
+#
+# requests 차원:
+#   - 이 조건은 requests 무설정 파이프라인(pipeline/petclinic-build-experiment.yaml, 현재 requests 없음)을
+#     명시 적용해 (off, unset) 을 보장한다.
+#   - 대응쌍 A0-R(off, requests 설정)은 requests 주석이 붙은 파이프라인 변형이 필요하며,
+#     그 값은 GKE 단일 PR 피크 메모리 최종 실측 후 확정한다(param_measurement.md). → 별도 TODO.
+
+scenario: a0nr_no_requests
+namespace: default-cicd
+
+controller: disabled              # 웹훅 failurePolicy=Ignore + Deployment replicas=0
+requests: unset                   # no-requests 파이프라인 적용
+pipeline: pipeline/petclinic-build-experiment.yaml
+
+load:
+  mode: burst
+  count: 90                       # L_max x 3
+  interval_sec: 0.33
+  env: dev
+  generate_name: true
+
+destructive: true                 # OOM/NotReady 유발 — 최후 수행, 사용자 명시 지시 필요

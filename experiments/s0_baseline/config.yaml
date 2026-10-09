@@ -1,0 +1,22 @@
+# S0 — Baseline
+# 목적: 정상 부하에서 제어군/실험군 기준선 확립 (H1·H2)
+# 논문 3.3절
+
+scenario: s0_baseline
+namespace: default-cicd
+
+lmax: 30                  # 빌드 노드 3대 × 10
+aging_interval_sec: 180
+
+load:
+  rate_per_min: 1         # λ = 1/분
+  duration_min: 30        # 측정 구간
+  warmup_min: 5
+  cooldown_min: 5
+  repeat: 5               # N≥5, 중앙값 보고
+
+# Tier 비율 (prod:stg:dev = 1:2:7)
+env_distribution:
+  prod: 0.1
+  stg:  0.2
+  dev:  0.7

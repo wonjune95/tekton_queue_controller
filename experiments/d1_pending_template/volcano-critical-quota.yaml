@@ -1,0 +1,31 @@
+# Volcano 설치 전제 — GKE 에서만 필요하다.
+#
+# ── 왜 필요한가 (2026-08-22 재구축에서 발견) ─────────────────────
+# Volcano 의 scheduler·controllers·admission Deployment 는 `priorityClassName: system-cluster-critical`
+# 을 쓴다. GKE 는 kube-system 밖의 네임스페이스에서 critical PriorityClass 를 쓰려면
+# 그 네임스페이스에 **해당 스코프의 ResourceQuota 가 있을 것**을 요구한다.
+# 없으면 파드가 아예 생성되지 않는다:
+#
+#   Error creating: insufficient quota to match these scopes:
+#     [{PriorityClass In [system-node-critical system-cluster-critical]}]
+#
+# Deployment 는 만들어지지만 ReplicaSet 이 파드를 못 만들어 `0/1  0  0` 으로 멈춘다
+# (ReplicaFailure=True/FailedCreate). rollout status 는 타임아웃으로만 보이므로 원인이 드러나지 않는다.
+#
+# ⚠️ `volcano-development.yaml` 적용 **전에** 이 파일을 적용해야 한다(네임스페이스는 먼저 만들 것).
+#    나중에 적용해도 ReplicaSet 이 재시도하므로 복구되지만, 그때까지 rollout 이 실패한다.
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: volcano-critical-pods
+  namespace: volcano-system
+spec:
+  hard:
+    pods: "20"
+  scopeSelector:
+    matchExpressions:
+      - operator: In
+        scopeName: PriorityClass
+        values:
+          - system-node-critical
+          - system-cluster-critical

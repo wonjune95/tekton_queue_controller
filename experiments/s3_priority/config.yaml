@@ -1,0 +1,22 @@
+# S3 — Adversarial
+# 목적: λ≥μ 경계 조건에서 H3(Wmax) 한계 식별
+# 논문 3.3절
+
+scenario: s3_adversarial
+namespace: default-cicd
+
+lmax: 30
+
+load:
+  # λ≥μ: μ는 실측 후 확정 (논문 기준 ~1.7μ)
+  # 빌드 노드 3대, PR당 평균 실행 시간 측정 후 rate 확정
+  rate_per_min: 3         # 초기값 — S0 실측 후 조정
+  duration_min: 30
+  repeat: 5
+
+env_distribution:
+  prod: 0.1
+  stg:  0.2
+  dev:  0.7
+
+# 확인 포인트: Wmax(360초) 초과 여부, 대기열 적체 누적

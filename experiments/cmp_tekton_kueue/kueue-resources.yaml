@@ -1,0 +1,35 @@
+---
+# tekton-kueue 비교군: Kueue 큐 리소스 (count 기반 동시성 쿼터)
+# PoC(poc_log.md §1) 검증 구성. Kueue v0.16.6 (kueue.x-k8s.io/v1beta1).
+#
+# 동작: tekton-kueue 웹훅이 모든 PipelineRun 을 LocalQueue `pipelines-queue` 에 연결하고
+#       Workload 에 특수 자원 `tekton.dev/pipelineruns=1` 을 부여 → ClusterQueue 쿼터로 동시 실행 수 제어.
+#       nominalQuota=30 → 내 컨트롤러 L_max=30 과 동일한 동시성 상한(count 기반, 직접 대응).
+#       정렬은 ClusterQueue 기본 BestEffortFIFO(에이징 없음) — 내 컨트롤러의 차별화 축.
+apiVersion: kueue.x-k8s.io/v1beta1
+kind: ResourceFlavor
+metadata:
+  name: default-flavor
+---
+apiVersion: kueue.x-k8s.io/v1beta1
+kind: ClusterQueue
+metadata:
+  name: pipelines-cq
+spec:
+  namespaceSelector: {}          # 모든 네임스페이스
+  queueingStrategy: BestEffortFIFO
+  resourceGroups:
+  - coveredResources: ["tekton.dev/pipelineruns"]
+    flavors:
+    - name: default-flavor
+      resources:
+      - name: "tekton.dev/pipelineruns"
+        nominalQuota: 30         # = L_max (count 기반 동시성 상한)
+---
+apiVersion: kueue.x-k8s.io/v1beta1
+kind: LocalQueue
+metadata:
+  name: pipelines-queue          # tekton-kueue 웹훅이 연결하는 큐 이름(PoC 고정)
+  namespace: default-cicd
+spec:
+  clusterQueue: pipelines-cq

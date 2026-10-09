@@ -1,0 +1,17 @@
+# S2 — Release Burst
+# 목적: 순간 Lmax×3 폭증 시 동시 실행 상한 위반 여부 확인 (H1)
+# 논문 3.3절
+
+scenario: s2_release_burst
+namespace: default-cicd
+
+lmax: 30
+
+load:
+  # 30초 내 Lmax×3 = 90개 일괄 생성
+  count: 90
+  interval_sec: 0.33      # 30초 / 90개
+  env: dev                # 전량 Tier3 (최악의 경우)
+  repeat: 5
+
+# 측정: 최대 동시 실행 수가 Lmax=30 초과 여부, 전체 완료율

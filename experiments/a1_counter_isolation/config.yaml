@@ -1,0 +1,23 @@
+# A1' — admitted 카운터 격리 (disableAdmittedCounter=true)
+# 목적: L_max=30 을 유지한 채 admitted 카운터만 비활성화 → watch 지연 창의
+#       순간 상한 초과(L_max+delta) 노출. A1(maxPipelines=999)과 달리 상한은 유지하고
+#       카운터의 기여만 격리한다.
+# ※ generateName 부하 필수: named PR 은 웹훅이 phantom 캐시를 즉시 삽입해
+#   슬롯을 반영하므로 카운터를 꺼도 초과가 발생하지 않는다(null 결과).
+#   generateName 은 이름 미정이라 phantom 이 없어 admitted 카운터가 유일한 슬롯 브리지가 된다.
+
+scenario: a1prime_disable_counter
+namespace: default-cicd
+
+lmax: 30                         # 상한 유지 (A1 과의 차이점)
+disable_admitted_counter: true   # 실험 조건 — run.sh 가 CRD 패치
+
+load:
+  mode: burst
+  count: 90                      # L_max x 3
+  interval_sec: 0.33
+  env: dev
+  generate_name: true            # phantom 미삽입 → 카운터가 유일 브리지
+
+# 파괴적 조건: 순간 상한 초과로 자원 경합/OOM 유발 가능 → 비파괴 조건 이후 최후 수행.
+destructive: true

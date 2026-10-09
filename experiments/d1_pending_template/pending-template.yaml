@@ -1,0 +1,49 @@
+# 보류 상태로 상주하는 «원본 템플릿» — 실행되어서는 안 되는 파이프라인런.
+#
+# Tekton 의 spec.status: PipelineRunPending 은 「생성하되 실행하지 않는다」는 뜻이다.
+# CI 구성에서 이 필드는 **실행하지 않는 원본**을 상주시키는 데 쓰인다(트리거·대시보드가 복제해 실행본을 만든다).
+# 그런데 파이프라인런 계층의 큐잉도 같은 필드를 «대기 중» 표시로 쓴다.
+# 인가 계층이 둘을 구분하지 못하면 이 템플릿이 인가되어 실행된다 — 그것이 이 실험이 보려는 것이다.
+#
+# ⚠️ 이름은 run.sh 가 sed 로 치환한다(__NAME__). 직접 apply 하지 말 것.
+# ⚠️ 부하 파이프라인런과 **같은 파이프라인·같은 워크스페이스**를 쓴다.
+#    템플릿만 다른 구성을 쓰면 「그래서 안 걸린 것 아니냐」는 반론을 막을 수 없다.
+apiVersion: tekton.dev/v1
+kind: PipelineRun
+metadata:
+  name: __NAME__
+  namespace: default-cicd
+  labels:
+    env: dev
+    # 이 실험이 만든 오브젝트임을 표시한다(정리·집계용). 인가 판정에는 쓰이지 않는다.
+    d1-role: template
+spec:
+  # ── 이것이 이 실험의 전부다 ──
+  status: PipelineRunPending
+  pipelineRef:
+    name: petclinic-build
+  taskRunTemplate:
+    podTemplate:
+      nodeSelector:
+        node-role: build
+  params:
+    - name: git-url
+      value: http://gitea-service.devops-tools.svc:3000/admin/spring-petclinic.git
+    - name: git-revision
+      value: main
+    - name: env
+      value: dev
+    - name: image-tag
+      value: __NAME__
+  workspaces:
+    - name: shared-data
+      volumeClaimTemplate:
+        spec:
+          accessModes:
+            - ReadWriteOnce
+          # ⚠️ standard(HDD). 기본값 standard-rwo 는 SSD 쿼터를 소비하는데
+          #    노드 부트디스크가 SSD_TOTAL_GB=500 을 이미 전부 쓰고 있다.
+          storageClassName: standard
+          resources:
+            requests:
+              storage: 1Gi

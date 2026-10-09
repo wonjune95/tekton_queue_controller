@@ -1,0 +1,23 @@
+# S1 — Peak-hour
+# 목적: 저부하↔피크 교차로 차등 서비스·에이징 완화 효과 측정 (H2·H3)
+# 논문 3.3절
+
+scenario: s1_peak_hour
+namespace: default-cicd
+
+lmax: 30
+aging_interval_sec: 180
+
+load:
+  # 10분씩 교차 반복
+  phases:
+    - rate_per_min: 1     # 저부하 λ=1/분
+      duration_min: 10
+    - rate_per_min: 10    # 피크 λ=10/분
+      duration_min: 10
+  repeat: 5
+
+env_distribution:
+  prod: 0.1
+  stg:  0.2
+  dev:  0.7

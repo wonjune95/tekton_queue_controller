@@ -1,0 +1,45 @@
+# 부하 발생기 가장(impersonation) 대상 SA 와 그 권한
+#
+# ── 왜 필요한가 ────────────────────────────────────────────────────
+# 컨트롤러 웹훅은 GlobalLimit.managedSAPatterns 에 매칭되는 «출처»의 파이프라인런만 큐에 넣는다.
+# 부하 발생기는 사람 계정 자격이므로 그대로 두면 전부 비관리로 분류되어 영구 보류된다.
+# 그래서 pr_create.py 는 Dashboard SA 를 임퍼소네이트해 운영 경로와 같은 출처로 생성한다
+# (common/pr_create.py 의 IMPERSONATE_SA, 논문 §3.2.2 「Dashboard SA 출처에만 적용」).
+#
+# 업스트림 Tekton Dashboard 번들이 주는 ClusterRole 은 tekton-dashboard-backend-view /
+# tenant-view 로 **읽기 전용**이라 파이프라인런을 만들 수 없다(2026-08-12 재구축에서 403 확인).
+# 캠페인 때는 이 권한을 수동으로 부여했고 저장소에 남기지 않아 재구축 시 재현되지 않았다.
+# → 이 파일이 그 공백을 메운다. 적용: kubectl apply -f common/loadgen-rbac.yaml
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: tekton-dashboard
+  namespace: tekton-pipelines
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: loadgen-pipelinerun-writer
+  namespace: default-cicd
+rules:
+  - apiGroups: ["tekton.dev"]
+    resources: ["pipelineruns"]
+    verbs: ["create", "get", "list", "watch", "patch", "delete"]
+  - apiGroups: ["tekton.dev"]
+    resources: ["pipelines", "taskruns"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: loadgen-pipelinerun-writer
+  namespace: default-cicd
+subjects:
+  - kind: ServiceAccount
+    name: tekton-dashboard
+    namespace: tekton-pipelines
+roleRef:
+  kind: Role
+  name: loadgen-pipelinerun-writer
+  apiGroup: rbac.authorization.k8s.io

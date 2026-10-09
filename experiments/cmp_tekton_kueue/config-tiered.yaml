@@ -1,0 +1,19 @@
+# tekton-kueue 설정 — Tier 인지 버전 (2026-08-04)
+#
+# 기존(기본 설정): priority("tekton-kueue-default")  → 전건 동일 우선순위(value 0)
+# 이 버전:          env 라벨(prod/stg/dev) 을 tier1/tier2/tier3 우선순위로 매핑
+#
+# CEL 은 pipelineRun 객체 전체를 맵으로 노출한다(konflux-ci/tekton-kueue 문서 확인).
+# 라벨이 없는 건이 있으면 맵 접근이 오류가 되므로 `in` 으로 존재를 먼저 확인하고,
+# 없으면 제안 컨트롤러의 기본값과 동일하게 tier3 으로 떨어뜨린다.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: tekton-kueue-config
+  namespace: tekton-kueue
+data:
+  config.yaml: |
+    queueName: pipelines-queue
+    cel:
+      expressions:
+        - 'priority("env" in pipelineRun.metadata.labels ? (pipelineRun.metadata.labels["env"] == "prod" ? "tier1" : (pipelineRun.metadata.labels["env"] == "stg" ? "tier2" : "tier3")) : "tier3")'

@@ -1,0 +1,57 @@
+# 제외 라벨이 붙은 보류 템플릿 — D2 실험용.
+#
+# D1 에서 확인된 것: tekton-kueue 는 보류 템플릿을 대기 항목으로 잡아 실행시킨다.
+# 그 회피 방안이 «템플릿에 제외 라벨을 붙이고 웹훅 objectSelector 로 걸러내는 것» 이다
+# (tekton-kueue-report.md 4.1절).
+#
+# ── D2 가 보려는 것 ──────────────────────────────────────────────
+# 그 회피에 대가가 따르는가.
+#
+# Tekton Dashboard 의 rerun 은 원본을 structuredClone 으로 복제하고 **사용자 라벨을 유지**한다
+# (src/api/pipelineRuns.js — status·spec.status·시스템 라벨만 제거).
+# 따라서 템플릿에 붙인 제외 라벨은 **복제된 실행본에도 따라간다.**
+# 그러면 실행본도 웹훅에서 제외되어 큐를 타지 않는다 — 즉 상한 통제 밖에 놓인다.
+#
+# 이 파일의 라벨 `d2-exclude: "true"` 가 그 제외 라벨 역할을 한다.
+# 웹훅 objectSelector 를 `d2-exclude NotIn [true]` 로 설정해 걸러낸다.
+#
+# ⚠️ 이름은 run.sh 가 sed 로 치환한다(__NAME__).
+apiVersion: tekton.dev/v1
+kind: PipelineRun
+metadata:
+  name: __NAME__
+  namespace: default-cicd
+  labels:
+    env: dev
+    # 실험 오브젝트 표시(집계용, 인가 판정과 무관)
+    d2-role: template
+    # ── 이것이 제외 라벨이다 ──
+    # 복제 시 따라가는지가 이 실험의 핵심이다.
+    d2-exclude: "true"
+spec:
+  status: PipelineRunPending
+  pipelineRef:
+    name: petclinic-build
+  taskRunTemplate:
+    podTemplate:
+      nodeSelector:
+        node-role: build
+  params:
+    - name: git-url
+      value: http://gitea-service.devops-tools.svc:3000/admin/spring-petclinic.git
+    - name: git-revision
+      value: main
+    - name: env
+      value: dev
+    - name: image-tag
+      value: __NAME__
+  workspaces:
+    - name: shared-data
+      volumeClaimTemplate:
+        spec:
+          accessModes:
+            - ReadWriteOnce
+          storageClassName: standard
+          resources:
+            requests:
+              storage: 1Gi

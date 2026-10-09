@@ -24,3 +24,6 @@ nonmoon/
 # ── 실험 결과 데이터 ──────────────────────────────
 tests/integration_results.json
 result-exp-a.csv
+
+# ── 실험 하니스 원자료 (공개 범위 밖) ────────────────
+experiments/results*/

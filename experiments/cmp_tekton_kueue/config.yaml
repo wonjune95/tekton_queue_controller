@@ -1,0 +1,20 @@
+# 비교군: tekton-kueue (동일 어드미션 계층)
+# 매트릭스(HANDOVER §5): S1·S2·S3 × N5 (KTCP 핵심).
+# 목적: 같은 파이프라인런 어드미션 계층에서 정렬 정책(에이징 vs BestEffortFIFO) 차이를 직접 비교.
+#
+# 전제(환경 구성, comparison_setup.md):
+#   - Tekton v1.9.2 + cert-manager + Kueue v0.16.6(외부 프레임워크 pipelineruns.tekton.dev) + tekton-kueue 애드온 설치됨.
+#   - 큐 리소스 kueue-resources.yaml 적용(nominalQuota=30 = L_max).
+# 실행 시:
+#   - 내 컨트롤러만 비활성(웹훅 Ignore + scale 0). tekton-kueue 가 게이팅.
+#   - 부하는 본실험과 동일(푸아송·generateName). requests 불필요(쿼터가 count 기반).
+
+scenario: cmp_tekton_kueue
+namespace: default-cicd
+gating: tekton-kueue
+quota: 30                        # tekton.dev/pipelineruns nominalQuota = L_max
+scenarios: [s1, s2, s3]          # 각 N5
+sorting: BestEffortFIFO          # 에이징 없음(차별화 축)
+load: generateName               # 본실험과 동일
+requests: not_required           # count 기반 쿼터라 cpu/memory requests 불필요
+destructive: false

@@ -659,6 +659,12 @@ python -m tests.integration_scenarios
 
 ---
 
+## 15. 실험 하니스 (Experiment Harness)
+
+학위논문 실험에 쓴 부하 발생기·시나리오·집계 스크립트는 [`experiments/`](experiments/) 에 있다. GKE 구성은 `experiments/GKE_SETUP.md`, 비교군 설치는 `experiments/COMPARISON_SETUP.md` 를 따른다. 회차별 원자료는 포함하지 않는다.
+
+---
+
 ## 라이선스
 
 [MIT](LICENSE) © 2026 Wongjun Jang

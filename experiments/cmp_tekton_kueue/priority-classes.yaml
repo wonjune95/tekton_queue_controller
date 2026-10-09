@@ -1,0 +1,31 @@
+# tekton-kueue 우선순위 구성 — 제안 컨트롤러의 Tier 와 동등한 정보를 tekton-kueue 에도 준다.
+#
+# ── 왜 필요한가 (2026-08-04 발견) ─────────────────────────────────
+# 기존 C-K 15회는 CEL 이 `priority("tekton-kueue-default")` 한 줄이라
+# **모든 파이프라인런이 같은 우선순위(value 0)** 를 받았다. 즉 tekton-kueue 에는
+# Tier 정보가 전달되지 않았고, 4장 표 4-3 의 «Tier 역전» 은 정렬 정책의 차이가 아니라
+# «한쪽에만 우선순위를 알려준 결과» 였다. 그대로 실으면 비교의 공정성을 방어할 수 없다.
+#
+# 값은 제안 컨트롤러의 Tier 와 방향을 맞춘다(Tier 1 = 가장 높은 우선순위).
+# Kueue 는 값이 **클수록** 우선하므로 Tier1 에 가장 큰 값을 준다.
+---
+apiVersion: kueue.x-k8s.io/v1beta1
+kind: WorkloadPriorityClass
+metadata:
+  name: tier1
+value: 100
+description: "Tier 1 (prod) — 제안 컨트롤러의 Tier 1 에 대응"
+---
+apiVersion: kueue.x-k8s.io/v1beta1
+kind: WorkloadPriorityClass
+metadata:
+  name: tier2
+value: 50
+description: "Tier 2 (stg) — 제안 컨트롤러의 Tier 2 에 대응"
+---
+apiVersion: kueue.x-k8s.io/v1beta1
+kind: WorkloadPriorityClass
+metadata:
+  name: tier3
+value: 10
+description: "Tier 3 (dev) — 제안 컨트롤러의 Tier 3 에 대응"

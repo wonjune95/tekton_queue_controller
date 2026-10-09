@@ -1,0 +1,225 @@
+# 자동 생성 파일 — make_requests_pipeline.py
+# 입력: results/param/mem_peak_workingset.csv (표본 6건)
+# requests=P95 (memory limits 미주입 — 실험 변수는 requests 설정 여부)
+apiVersion: tekton.dev/v1
+kind: Pipeline
+metadata:
+  name: petclinic-build-requests
+  namespace: default-cicd
+spec:
+  description: 'Petclinic CI 실험용 파이프라인.
+
+    Gitea 소스 클론 → Maven 빌드(package) → Kaniko 이미지 빌드 → Harbor Push → Trivy 스캔
+
+    '
+  params:
+  - name: git-url
+    default: http://gitea-service.devops-tools.svc:3000/admin/spring-petclinic.git
+    type: string
+  - name: git-revision
+    default: main
+    type: string
+  - name: java-version
+    default: '17'
+    type: string
+  - name: env
+    default: dev
+    type: string
+  - name: image-tag
+    default: latest
+    type: string
+  workspaces:
+  - name: shared-data
+  tasks:
+  - name: code-fetch
+    displayName: Code Fetch
+    taskSpec:
+      params:
+      - name: url
+      - name: revision
+        default: main
+      workspaces:
+      - name: output
+      steps:
+      - name: clone
+        image: alpine/git:latest
+        script: "#!/bin/sh\nset -e\ngit clone --depth 1 \\\n  --branch $(params.revision) \\\n  $(params.url) \\\n  $(workspaces.output.path)/src\n\
+          cd $(workspaces.output.path)/src\necho \"Cloned $(params.url) @ $(git log -1 --pretty='%h %s')\"\n"
+        computeResources:
+          requests:
+            memory: 19Mi
+            cpu: 200m
+    params:
+    - name: url
+      value: $(params.git-url)
+    - name: revision
+      value: $(params.git-revision)
+    workspaces:
+    - name: output
+      workspace: shared-data
+  - name: code-build
+    displayName: Code Build
+    runAfter:
+    - code-fetch
+    taskSpec:
+      params:
+      - name: java-version
+        default: '17'
+      workspaces:
+      - name: source
+      results:
+      - name: jar-name
+        type: string
+      volumes:
+      - name: maven-settings
+        configMap:
+          name: maven-settings
+      steps:
+      - name: mvn-package
+        image: maven:3.9-eclipse-temurin-$(params.java-version)
+        workingDir: $(workspaces.source.path)/src
+        volumeMounts:
+        - name: maven-settings
+          mountPath: /etc/maven
+        script: "#!/bin/bash\nset -e\nmvn package \\\n  -B \\\n  -s /etc/maven/settings.xml \\\n  -DskipTests=true \\\n  -Dmaven.repo.local=/tmp/.m2\n\
+          JAR=$(find target -name \"*.jar\" -not -name \"*sources*\" | head -1)\necho \"Built: $JAR\"\necho -n \"$(basename\
+          \ $JAR)\" | tee $(results.jar-name.path)\n"
+        computeResources:
+          requests:
+            memory: 648Mi
+            cpu: 200m
+    params:
+    - name: java-version
+      value: $(params.java-version)
+    workspaces:
+    - name: source
+      workspace: shared-data
+  - name: write-dockerfile
+    displayName: Write Dockerfile
+    runAfter:
+    - code-build
+    taskSpec:
+      params:
+      - name: java-version
+        default: '17'
+      - name: jar-name
+      workspaces:
+      - name: source
+      steps:
+      - name: write
+        image: alpine:3.19
+        workingDir: $(workspaces.source.path)/src
+        script: '#!/bin/sh
+
+          cat > Dockerfile <<EOF
+
+          FROM harbor.harbor.svc:80/library/eclipse-temurin:$(params.java-version)-jre-alpine
+
+          WORKDIR /app
+
+          COPY target/$(params.jar-name) app.jar
+
+          ENTRYPOINT ["java", "-jar", "app.jar"]
+
+          EOF
+
+          cat Dockerfile
+
+          '
+        computeResources:
+          requests:
+            memory: 64Mi
+            cpu: 200m
+    params:
+    - name: java-version
+      value: $(params.java-version)
+    - name: jar-name
+      value: $(tasks.code-build.results.jar-name)
+    workspaces:
+    - name: source
+      workspace: shared-data
+  - name: image-build
+    displayName: Image Build & Push
+    runAfter:
+    - write-dockerfile
+    taskSpec:
+      params:
+      - name: image
+      workspaces:
+      - name: source
+      steps:
+      - name: kaniko
+        image: gcr.io/kaniko-project/executor:v1.23.2
+        args:
+        - --dockerfile=$(workspaces.source.path)/src/Dockerfile
+        - --context=$(workspaces.source.path)/src
+        - --destination=$(params.image)
+        - --skip-tls-verify
+        - --insecure
+        - --insecure-pull
+        - --compressed-caching=false
+        - --cache=false
+        env:
+        - name: DOCKER_CONFIG
+          value: /kaniko/.docker
+        volumeMounts:
+        - name: docker-config
+          mountPath: /kaniko/.docker
+        computeResources:
+          requests:
+            memory: 174Mi
+            cpu: 200m
+      volumes:
+      - name: docker-config
+        projected:
+          sources:
+          - secret:
+              name: harbor-kaniko-config
+              items:
+              - key: config.json
+                path: config.json
+    params:
+    - name: image
+      value: harbor.harbor.svc:80/library/petclinic-$(params.env)-$(params.image-tag):build
+    workspaces:
+    - name: source
+      workspace: shared-data
+  - name: image-scan
+    displayName: Trivy Image Scan
+    runAfter:
+    - image-build
+    taskSpec:
+      params:
+      - name: image
+      volumes:
+      - name: harbor-auth
+        projected:
+          sources:
+          - secret:
+              name: harbor-kaniko-config
+              items:
+              - key: config.json
+                path: config.json
+      steps:
+      - name: trivy-scan
+        image: aquasec/trivy:0.57.0
+        env:
+        - name: TRIVY_DB_REPOSITORY
+          value: harbor.harbor.svc:80/library/trivy-db:2
+        - name: TRIVY_JAVA_DB_REPOSITORY
+          value: harbor.harbor.svc:80/library/trivy-java-db:1
+        - name: DOCKER_CONFIG
+          value: /harbor-auth
+        volumeMounts:
+        - name: harbor-auth
+          mountPath: /harbor-auth
+        script: "#!/bin/sh\nset -e\necho \"Trivy 이미지 스캔: $(params.image)\"\ntrivy image \\\n  --exit-code 0 \\\n  --severity\
+          \ HIGH,CRITICAL \\\n  --scanners vuln \\\n  --insecure \\\n  --timeout 10m \\\n  $(params.image)\necho \"스캔 완료\"\
+          \n"
+        computeResources:
+          requests:
+            memory: 401Mi
+            cpu: 200m
+    params:
+    - name: image
+      value: harbor.harbor.svc:80/library/petclinic-$(params.env)-$(params.image-tag):build

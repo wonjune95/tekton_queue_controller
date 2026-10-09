@@ -1,0 +1,223 @@
+---
+# Volcano 비교군용 파이프라인 변형 (petclinic-build-volcano)
+# 원본(petclinic-build)과 차이: 각 태스크에 stepTemplate.computeResources.requests.cpu=100m 주입.
+#   → Volcano 가 파드 cpu 요청량으로 큐 capability 대비 게이팅할 수 있게 하는 **제어 노브**.
+#   Volcano 큐 default capability cpu=3 과 함께 쓰면 3000m / 100m = 30 → 내 L_max=30 과 유사한 동시성 상한.
+#   (cpu=100m 은 게이팅 제어용 잠정값. 실제 자원 사용과 무관. GKE에서 조정 가능.)
+# ※ 태스크 파드 라우팅(schedulerName: volcano)은 PR 측에서 주입: pr_create.py --scheduler-name volcano.
+apiVersion: tekton.dev/v1
+kind: Pipeline
+metadata:
+  name: petclinic-build-volcano
+  namespace: default-cicd
+spec:
+  description: |
+    Volcano 비교군: petclinic-build 에 파드 cpu 요청량(100m) 부여(게이팅 제어 노브).
+  params:
+  - name: git-url
+    default: http://gitea-service.devops-tools.svc:3000/admin/spring-petclinic.git
+    type: string
+  - name: git-revision
+    default: main
+    type: string
+  - name: java-version
+    default: "17"
+    type: string
+  - name: env
+    default: dev
+    type: string
+  - name: image-tag
+    default: "latest"
+    type: string
+  workspaces:
+  - name: shared-data
+  tasks:
+  - name: code-fetch
+    taskSpec:
+      params:
+      - name: url
+      - name: revision
+        default: main
+      workspaces:
+      - name: output
+      stepTemplate:
+        computeResources:
+          requests:
+            cpu: 100m
+      steps:
+      - name: clone
+        image: alpine/git:latest
+        script: |
+          #!/bin/sh
+          set -e
+          git clone --depth 1 --branch $(params.revision) $(params.url) $(workspaces.output.path)/src
+          cd $(workspaces.output.path)/src
+          echo "Cloned $(params.url) @ $(git log -1 --pretty='%h %s')"
+    params:
+    - name: url
+      value: $(params.git-url)
+    - name: revision
+      value: $(params.git-revision)
+    workspaces:
+    - name: output
+      workspace: shared-data
+  - name: code-build
+    runAfter: [code-fetch]
+    taskSpec:
+      params:
+      - name: java-version
+        default: "17"
+      workspaces:
+      - name: source
+      results:
+      - name: jar-name
+        type: string
+      volumes:
+      - name: maven-settings
+        configMap:
+          name: maven-settings
+      stepTemplate:
+        computeResources:
+          requests:
+            cpu: 100m
+      steps:
+      - name: mvn-package
+        image: maven:3.9-eclipse-temurin-$(params.java-version)
+        workingDir: $(workspaces.source.path)/src
+        volumeMounts:
+        - name: maven-settings
+          mountPath: /etc/maven
+        script: |
+          #!/bin/bash
+          set -e
+          mvn package -B -s /etc/maven/settings.xml -DskipTests=true -Dmaven.repo.local=/tmp/.m2
+          JAR=$(find target -name "*.jar" -not -name "*sources*" | head -1)
+          echo "Built: $JAR"
+          echo -n "$(basename $JAR)" | tee $(results.jar-name.path)
+    params:
+    - name: java-version
+      value: $(params.java-version)
+    workspaces:
+    - name: source
+      workspace: shared-data
+  - name: write-dockerfile
+    runAfter: [code-build]
+    taskSpec:
+      params:
+      - name: java-version
+        default: "17"
+      - name: jar-name
+      workspaces:
+      - name: source
+      stepTemplate:
+        computeResources:
+          requests:
+            cpu: 100m
+      steps:
+      - name: write
+        image: alpine:3.19
+        workingDir: $(workspaces.source.path)/src
+        script: |
+          #!/bin/sh
+          cat > Dockerfile <<EOF
+          FROM harbor.harbor.svc:80/library/eclipse-temurin:$(params.java-version)-jre-alpine
+          WORKDIR /app
+          COPY target/$(params.jar-name) app.jar
+          ENTRYPOINT ["java", "-jar", "app.jar"]
+          EOF
+          cat Dockerfile
+    params:
+    - name: java-version
+      value: $(params.java-version)
+    - name: jar-name
+      value: $(tasks.code-build.results.jar-name)
+    workspaces:
+    - name: source
+      workspace: shared-data
+  - name: image-build
+    runAfter: [write-dockerfile]
+    taskSpec:
+      params:
+      - name: image
+      workspaces:
+      - name: source
+      stepTemplate:
+        computeResources:
+          requests:
+            cpu: 100m
+      steps:
+      - name: kaniko
+        image: gcr.io/kaniko-project/executor:v1.23.2
+        args:
+        - --dockerfile=$(workspaces.source.path)/src/Dockerfile
+        - --context=$(workspaces.source.path)/src
+        - --destination=$(params.image)
+        - --skip-tls-verify
+        - --insecure
+        - --insecure-pull
+        - --compressed-caching=false
+        - --cache=false
+        env:
+        - name: DOCKER_CONFIG
+          value: /kaniko/.docker
+        volumeMounts:
+        - name: docker-config
+          mountPath: /kaniko/.docker
+      volumes:
+      - name: docker-config
+        projected:
+          sources:
+          - secret:
+              name: harbor-kaniko-config
+              items:
+              - key: config.json
+                path: config.json
+    params:
+    - name: image
+      value: harbor.harbor.svc:80/library/petclinic-$(params.env)-$(params.image-tag):build
+    workspaces:
+    - name: source
+      workspace: shared-data
+  - name: image-scan
+    runAfter: [image-build]
+    taskSpec:
+      params:
+      - name: image
+      volumes:
+      - name: harbor-auth
+        projected:
+          sources:
+          - secret:
+              name: harbor-kaniko-config
+              items:
+              - key: config.json
+                path: config.json
+      stepTemplate:
+        computeResources:
+          requests:
+            cpu: 100m
+      steps:
+      - name: trivy-scan
+        image: aquasec/trivy:0.57.0
+        env:
+        - name: TRIVY_DB_REPOSITORY
+          value: harbor.harbor.svc:80/library/trivy-db:2
+        - name: TRIVY_JAVA_DB_REPOSITORY
+          value: harbor.harbor.svc:80/library/trivy-java-db:1
+        - name: DOCKER_CONFIG
+          value: /harbor-auth
+        volumeMounts:
+        - name: harbor-auth
+          mountPath: /harbor-auth
+        script: |
+          #!/bin/sh
+          set -e
+          echo "Trivy 이미지 스캔: $(params.image)"
+          trivy image --exit-code 0 --severity HIGH,CRITICAL --scanners vuln --insecure --timeout 10m $(params.image)
+          echo "스캔 완료"
+    params:
+    - name: image
+      value: harbor.harbor.svc:80/library/petclinic-$(params.env)-$(params.image-tag):build
+    workspaces:
+    - name: source
+      workspace: shared-data

@@ -1,0 +1,19 @@
+# A1 — N_admitted 추적 제거
+# 목적: N_admitted 카운터 없을 때 레이스 컨디션 발생 확인
+# S3와 동일 부하, 컨트롤러에서 admitted 카운터 비활성화 후 실행
+
+scenario: a1_no_admitted
+base_scenario: s3_release_burst
+
+# 컨트롤러 설정 변경:
+#   config.py의 admitted 카운터를 0으로 고정하거나
+#   GlobalLimit CRD의 maxPipelines를 0으로 설정해 강제 오판 유발
+ablation: no_admitted_tracking
+
+namespace: default-cicd
+lmax: 30
+
+load:
+  count: 90
+  interval_sec: 0.33
+  env: dev

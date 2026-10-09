@@ -1,0 +1,1323 @@
+# 논문용 대시보드 — 캠페인 시계열을 4장 그림에 대응하는 화면으로 본다.
+#
+# 설계 원칙 (2026-08-03 개정)
+#   · **L_max 는 데이터가 아니라 기준선**이다 → 빨간 파선, 채움 없음. 실측(실행 중)만 면으로 채운다.
+#     이렇게 해야 «상한에 붙어 평평» 과 «상한을 뚫음» 이 한눈에 갈린다(A1′ 그림의 핵심).
+#   · 범례를 표 형식으로 두고 **최대·평균을 함께 표시**한다 → 그림만 보고 수치를 읽을 수 있어
+#     본문 표와 대조하기 쉽다.
+#   · 상단에 요약 수치 4개를 둔다 → 캡처 한 장으로 회차의 결론이 보인다.
+#   · CPU 를 메모리보다 먼저 놓는다. 실측 병목이 CPU 이고 메모리는 조건을 가르지 못했다(HANDOVER 참조).
+#
+# ※ 패널 1 의 쿼리는 반드시 max() 로 감싼다.
+#   비교군·에이블레이션 회차가 컨트롤러를 scale 0→1 로 교체하므로 pod/instance 라벨이 다른
+#   시계열이 누적된다. 원시 지표를 그대로 쓰면 범례가 «실행 중, 실행 중, L_max, L_max» 로 중복된다.
+#   어느 시점이든 리더는 하나이므로 max() 가 올바른 집계다.
+#
+# ※ **컨트롤러를 끄는 조건(A0-R·A0-NR·비교군)에서는 패널 1·5 가 비어 있는 것이 정상이다.**
+#   그 지표를 생산하는 주체가 꺼져 있기 때문이다. 논문 그림 캡션에 한 줄 명시할 것.
+#
+# ※ 패널 5(웹훅 지연)는 rate 창이 10분이므로 **측정 창 앞 10분 값은 직전 회차가 섞인다.**
+#   수집기는 이 구간을 집계에서 제외한다(resource_collect.py). 그림에서도 앞부분은 읽지 말 것.
+#
+# 패널이 논문 그림과 대응한다:
+#   ① 동시 실행 시계열   → 패널 1·2      ② 자원 시계열 → 패널 3·4
+#   ④ 제어 계층 부하     → 패널 5        ⑤ 네임스페이스 메모리 → 패널 6
+#
+# 캡처 방법: 시간 범위를 각 회차의 측정 창으로 맞춘다.
+#   창 값은 `results/<시나리오>/run<N>_resource.json` 의 start/end 에 있다.
+#   URL 에 &from=<epoch_ms>&to=<epoch_ms>&kiosk 로 넣고 헤드리스 크롬으로 찍는다.
+# ── v2 개정 (2026-08-05) ──────────────────────────────────────────────
+# Tier 차원 패널 4개를 더했다. 새 4·5장이 말하는 것을 그대로 그린다.
+#   · 대기 깊이를 Tier 별로 쌓아 본다 → 기아와 그 완화가 층으로 보인다
+#   · 승격 이벤트(3→2, 2→1)를 따로 그린다 → 에이징 기구의 직접 증거
+#   · Tier 별 도착률 대 인가율 → 두 선의 간격이 곧 대기열 증가분이다
+#   · 제어 계층 처리율·API 오류
+#
+# ※ 패널 제목에 $ 를 쓰지 말 것 — Grafana 가 대시보드 변수로 해석해 글자가 사라진다.
+# ※ 오류 카운터는 "or vector(0)" 로 감싼다. 오류가 없으면 계열 자체가 없어
+#   패널이 비고, «오류 없음» 과 «수집 실패» 가 구분되지 않는다.
+# ※ 웹훅 지연이 부하 종료 후 끊기는 것은 정상이다(분위수 미정의).
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: grafana-dashboard-thesis
+  namespace: monitoring
+data:
+  thesis.json: |
+    {
+      "uid": "thesis-campaign",
+      "title": "Tekton 큐 컨트롤러 — 캠페인 (v2)",
+      "tags": [
+        "thesis"
+      ],
+      "timezone": "browser",
+      "schemaVersion": 39,
+      "version": 2,
+      "refresh": "",
+      "time": {
+        "from": "now-6h",
+        "to": "now"
+      },
+      "editable": true,
+      "graphTooltip": 1,
+      "panels": [
+        {
+          "id": 10,
+          "type": "stat",
+          "title": "최대 동시 실행",
+          "description": "측정 창 안의 최대값. L_max 를 넘으면 상한 위반이다.",
+          "gridPos": {
+            "h": 4,
+            "w": 4,
+            "x": 0,
+            "y": 0
+          },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "short",
+              "decimals": 0,
+              "color": {
+                "mode": "fixed",
+                "fixedColor": "green"
+              }
+            },
+            "overrides": []
+          },
+          "options": {
+            "reduceOptions": {
+              "calcs": [
+                "max"
+              ],
+              "fields": "",
+              "values": false
+            },
+            "textMode": "auto",
+            "graphMode": "area",
+            "colorMode": "value",
+            "justifyMode": "auto"
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "prometheus"
+              },
+              "expr": "max(tekton_queue_running_total)",
+              "legendFormat": "최대 동시 실행",
+              "refId": "A"
+            }
+          ]
+        },
+        {
+          "id": 11,
+          "type": "stat",
+          "title": "L_max (상한)",
+          "description": "해당 회차에 적용된 동시 실행 상한.",
+          "gridPos": {
+            "h": 4,
+            "w": 4,
+            "x": 4,
+            "y": 0
+          },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "short",
+              "decimals": 0,
+              "color": {
+                "mode": "fixed",
+                "fixedColor": "red"
+              }
+            },
+            "overrides": []
+          },
+          "options": {
+            "reduceOptions": {
+              "calcs": [
+                "max"
+              ],
+              "fields": "",
+              "values": false
+            },
+            "textMode": "auto",
+            "graphMode": "area",
+            "colorMode": "value",
+            "justifyMode": "auto"
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "prometheus"
+              },
+              "expr": "max(tekton_queue_limit)",
+              "legendFormat": "L_max (상한)",
+              "refId": "A"
+            }
+          ]
+        },
+        {
+          "id": 12,
+          "type": "stat",
+          "title": "최대 대기 깊이",
+          "description": "대기열에 동시에 쌓인 파이프라인런의 최대 수.",
+          "gridPos": {
+            "h": 4,
+            "w": 4,
+            "x": 8,
+            "y": 0
+          },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "short",
+              "decimals": 0,
+              "color": {
+                "mode": "fixed",
+                "fixedColor": "orange"
+              }
+            },
+            "overrides": []
+          },
+          "options": {
+            "reduceOptions": {
+              "calcs": [
+                "max"
+              ],
+              "fields": "",
+              "values": false
+            },
+            "textMode": "auto",
+            "graphMode": "area",
+            "colorMode": "value",
+            "justifyMode": "auto"
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "prometheus"
+              },
+              "expr": "max(sum(tekton_queue_pending_total) by (pod))",
+              "legendFormat": "최대 대기 깊이",
+              "refId": "A"
+            }
+          ]
+        },
+        {
+          "id": 13,
+          "type": "stat",
+          "title": "승격 건수",
+          "description": "이 측정 창 안에서 일어난 승격 횟수. 누적 카운터가 아니라 increase() 로 창 안의 증가분만 센다. 0 이면 에이징이 동작하지 않은 조건이다.",
+          "gridPos": {
+            "h": 4,
+            "w": 4,
+            "x": 12,
+            "y": 0
+          },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "short",
+              "decimals": 0,
+              "color": {
+                "mode": "fixed",
+                "fixedColor": "purple"
+              }
+            },
+            "overrides": []
+          },
+          "options": {
+            "reduceOptions": {
+              "calcs": [
+                "lastNotNull"
+              ],
+              "fields": "",
+              "values": false
+            },
+            "textMode": "auto",
+            "graphMode": "area",
+            "colorMode": "value",
+            "justifyMode": "auto"
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "prometheus"
+              },
+              "expr": "max(sum(increase(tekton_queue_promotion_total[$__range])) by (pod))",
+              "legendFormat": "승격 건수",
+              "refId": "A",
+              "instant": true
+            }
+          ]
+        },
+        {
+          "id": 14,
+          "type": "stat",
+          "title": "최대 동시 파드",
+          "description": "default-cicd 네임스페이스의 Running 파드 최대 수.",
+          "gridPos": {
+            "h": 4,
+            "w": 4,
+            "x": 16,
+            "y": 0
+          },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "short",
+              "decimals": 0,
+              "color": {
+                "mode": "fixed",
+                "fixedColor": "blue"
+              }
+            },
+            "overrides": []
+          },
+          "options": {
+            "reduceOptions": {
+              "calcs": [
+                "max"
+              ],
+              "fields": "",
+              "values": false
+            },
+            "textMode": "auto",
+            "graphMode": "area",
+            "colorMode": "value",
+            "justifyMode": "auto"
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "prometheus"
+              },
+              "expr": "sum(kube_pod_status_phase{namespace=\"default-cicd\",phase=\"Running\"})",
+              "legendFormat": "최대 동시 파드",
+              "refId": "A"
+            }
+          ]
+        },
+        {
+          "id": 15,
+          "type": "stat",
+          "title": "노드 CPU 최대",
+          "description": "빌드 노드의 CPU 사용률 최대값. 실측 병목은 CPU 다.",
+          "gridPos": {
+            "h": 4,
+            "w": 4,
+            "x": 20,
+            "y": 0
+          },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "percentunit",
+              "decimals": 1,
+              "color": {
+                "mode": "fixed",
+                "fixedColor": "red"
+              }
+            },
+            "overrides": []
+          },
+          "options": {
+            "reduceOptions": {
+              "calcs": [
+                "max"
+              ],
+              "fields": "",
+              "values": false
+            },
+            "textMode": "auto",
+            "graphMode": "area",
+            "colorMode": "value",
+            "justifyMode": "auto"
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "prometheus"
+              },
+              "expr": "max(1 - avg by(instance)(rate(node_cpu_seconds_total{mode=\"idle\"}[5m])))",
+              "legendFormat": "노드 CPU 최대",
+              "refId": "A"
+            }
+          ]
+        },
+        {
+          "id": 1,
+          "type": "timeseries",
+          "title": "동시 실행 파이프라인런 vs L_max (상한)",
+          "description": "H1 의 직접 증거. 실측(면)이 상한(빨간 파선)에 붙어 평평하면 상한이 지켜진 것이고, 파선을 넘으면 위반이다. 컨트롤러를 끄는 조건에서는 비어 있는 것이 정상이다.",
+          "gridPos": {
+            "h": 10,
+            "w": 12,
+            "x": 0,
+            "y": 4
+          },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "short",
+              "decimals": 0,
+              "min": 0,
+              "custom": {
+                "lineWidth": 2,
+                "fillOpacity": 18,
+                "showPoints": "never",
+                "spanNulls": false,
+                "axisSoftMax": 40
+              }
+            },
+            "overrides": [
+              {
+                "matcher": {
+                  "id": "byName",
+                  "options": "L_max"
+                },
+                "properties": [
+                  {
+                    "id": "color",
+                    "value": {
+                      "mode": "fixed",
+                      "fixedColor": "red"
+                    }
+                  },
+                  {
+                    "id": "custom.fillOpacity",
+                    "value": 0
+                  },
+                  {
+                    "id": "custom.lineWidth",
+                    "value": 2
+                  },
+                  {
+                    "id": "custom.lineStyle",
+                    "value": {
+                      "fill": "dash",
+                      "dash": [
+                        12,
+                        6
+                      ]
+                    }
+                  }
+                ]
+              },
+              {
+                "matcher": {
+                  "id": "byName",
+                  "options": "실행 중"
+                },
+                "properties": [
+                  {
+                    "id": "color",
+                    "value": {
+                      "mode": "fixed",
+                      "fixedColor": "green"
+                    }
+                  }
+                ]
+              }
+            ]
+          },
+          "options": {
+            "legend": {
+              "showLegend": true,
+              "displayMode": "table",
+              "placement": "bottom",
+              "calcs": [
+                "max",
+                "mean"
+              ]
+            },
+            "tooltip": {
+              "mode": "multi",
+              "sort": "none"
+            }
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "prometheus"
+              },
+              "expr": "max(tekton_queue_running_total)",
+              "legendFormat": "실행 중",
+              "refId": "A"
+            },
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "prometheus"
+              },
+              "expr": "max(tekton_queue_limit)",
+              "legendFormat": "L_max",
+              "refId": "B"
+            }
+          ]
+        },
+        {
+          "id": 2,
+          "type": "timeseries",
+          "title": "대기 깊이 — Tier 별 (누적)",
+          "description": "대기열의 구성이다. Tier 3(적색)만 두껍게 남아 줄지 않으면 기아이고, 에이징이 동작하면 이 층이 위로 빠져나간다. 상한이 지켜지는 동안 초과분이 어디에 머무는지 보여 준다.",
+          "gridPos": {
+            "h": 10,
+            "w": 12,
+            "x": 12,
+            "y": 4
+          },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "short",
+              "decimals": 0,
+              "min": 0,
+              "custom": {
+                "lineWidth": 2,
+                "fillOpacity": 70,
+                "showPoints": "never",
+                "spanNulls": false,
+                "stacking": {
+                  "mode": "normal",
+                  "group": "A"
+                }
+              }
+            },
+            "overrides": [
+              {
+                "matcher": {
+                  "id": "byName",
+                  "options": "Tier 1"
+                },
+                "properties": [
+                  {
+                    "id": "color",
+                    "value": {
+                      "mode": "fixed",
+                      "fixedColor": "#1F4E79"
+                    }
+                  }
+                ]
+              },
+              {
+                "matcher": {
+                  "id": "byName",
+                  "options": "Tier 2"
+                },
+                "properties": [
+                  {
+                    "id": "color",
+                    "value": {
+                      "mode": "fixed",
+                      "fixedColor": "#E08214"
+                    }
+                  }
+                ]
+              },
+              {
+                "matcher": {
+                  "id": "byName",
+                  "options": "Tier 3"
+                },
+                "properties": [
+                  {
+                    "id": "color",
+                    "value": {
+                      "mode": "fixed",
+                      "fixedColor": "#C0392B"
+                    }
+                  }
+                ]
+              }
+            ]
+          },
+          "options": {
+            "legend": {
+              "showLegend": true,
+              "displayMode": "table",
+              "placement": "bottom",
+              "calcs": [
+                "max",
+                "mean"
+              ]
+            },
+            "tooltip": {
+              "mode": "multi",
+              "sort": "none"
+            }
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "prometheus"
+              },
+              "expr": "max by(tier)(tekton_queue_pending_total{tier=\"1\"})",
+              "legendFormat": "Tier 1",
+              "refId": "A"
+            },
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "prometheus"
+              },
+              "expr": "max by(tier)(tekton_queue_pending_total{tier=\"2\"})",
+              "legendFormat": "Tier 2",
+              "refId": "B"
+            },
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "prometheus"
+              },
+              "expr": "max by(tier)(tekton_queue_pending_total{tier=\"3\"})",
+              "legendFormat": "Tier 3",
+              "refId": "C"
+            }
+          ]
+        },
+        {
+          "id": 3,
+          "type": "timeseries",
+          "title": "에이징 승격 이벤트 (건/분)",
+          "description": "에이징 기구의 직접 증거. 3→2 와 2→1 이 주기적으로 튀면 승격이 일어나는 것이다. 에이징을 끈 조건(A2)에서는 전 구간 0 이어야 한다.",
+          "gridPos": {
+            "h": 12,
+            "w": 12,
+            "x": 0,
+            "y": 14
+          },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "short",
+              "decimals": 1,
+              "min": 0,
+              "custom": {
+                "lineWidth": 2,
+                "fillOpacity": 25,
+                "showPoints": "never",
+                "spanNulls": false
+              }
+            },
+            "overrides": [
+              {
+                "matcher": {
+                  "id": "byName",
+                  "options": "Tier 3 → 2"
+                },
+                "properties": [
+                  {
+                    "id": "color",
+                    "value": {
+                      "mode": "fixed",
+                      "fixedColor": "#C0392B"
+                    }
+                  }
+                ]
+              },
+              {
+                "matcher": {
+                  "id": "byName",
+                  "options": "Tier 2 → 1"
+                },
+                "properties": [
+                  {
+                    "id": "color",
+                    "value": {
+                      "mode": "fixed",
+                      "fixedColor": "#E08214"
+                    }
+                  }
+                ]
+              }
+            ]
+          },
+          "options": {
+            "legend": {
+              "showLegend": true,
+              "displayMode": "table",
+              "placement": "bottom",
+              "calcs": [
+                "max",
+                "mean"
+              ]
+            },
+            "tooltip": {
+              "mode": "multi",
+              "sort": "none"
+            }
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "prometheus"
+              },
+              "expr": "max by(from_tier,to_tier)(rate(tekton_queue_promotion_total{from_tier=\"3\",to_tier=\"2\"}[5m])) * 60",
+              "legendFormat": "Tier 3 → 2",
+              "refId": "A"
+            },
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "prometheus"
+              },
+              "expr": "max by(from_tier,to_tier)(rate(tekton_queue_promotion_total{from_tier=\"2\",to_tier=\"1\"}[5m])) * 60",
+              "legendFormat": "Tier 2 → 1",
+              "refId": "B"
+            }
+          ]
+        },
+        {
+          "id": 4,
+          "type": "timeseries",
+          "title": "Tier 별 도착률 대 인가율 (건/분)",
+          "description": "실선은 웹훅이 받은 도착, 파선은 제어 루프가 인가한 건이다. 둘의 간격이 곧 대기열 증가분이며, Tier 별로 간격이 다른 것이 차등의 원인이다.",
+          "gridPos": {
+            "h": 12,
+            "w": 12,
+            "x": 12,
+            "y": 14
+          },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "short",
+              "decimals": 1,
+              "min": 0,
+              "custom": {
+                "lineWidth": 2,
+                "fillOpacity": 0,
+                "showPoints": "never",
+                "spanNulls": false
+              }
+            },
+            "overrides": [
+              {
+                "matcher": {
+                  "id": "byName",
+                  "options": "도착 T1"
+                },
+                "properties": [
+                  {
+                    "id": "color",
+                    "value": {
+                      "mode": "fixed",
+                      "fixedColor": "#1F4E79"
+                    }
+                  }
+                ]
+              },
+              {
+                "matcher": {
+                  "id": "byName",
+                  "options": "도착 T2"
+                },
+                "properties": [
+                  {
+                    "id": "color",
+                    "value": {
+                      "mode": "fixed",
+                      "fixedColor": "#E08214"
+                    }
+                  }
+                ]
+              },
+              {
+                "matcher": {
+                  "id": "byName",
+                  "options": "도착 T3"
+                },
+                "properties": [
+                  {
+                    "id": "color",
+                    "value": {
+                      "mode": "fixed",
+                      "fixedColor": "#C0392B"
+                    }
+                  }
+                ]
+              },
+              {
+                "matcher": {
+                  "id": "byName",
+                  "options": "인가 T1"
+                },
+                "properties": [
+                  {
+                    "id": "color",
+                    "value": {
+                      "mode": "fixed",
+                      "fixedColor": "#1F4E79"
+                    }
+                  },
+                  {
+                    "id": "custom.lineStyle",
+                    "value": {
+                      "fill": "dash",
+                      "dash": [
+                        8,
+                        4
+                      ]
+                    }
+                  }
+                ]
+              },
+              {
+                "matcher": {
+                  "id": "byName",
+                  "options": "인가 T2"
+                },
+                "properties": [
+                  {
+                    "id": "color",
+                    "value": {
+                      "mode": "fixed",
+                      "fixedColor": "#E08214"
+                    }
+                  },
+                  {
+                    "id": "custom.lineStyle",
+                    "value": {
+                      "fill": "dash",
+                      "dash": [
+                        8,
+                        4
+                      ]
+                    }
+                  }
+                ]
+              },
+              {
+                "matcher": {
+                  "id": "byName",
+                  "options": "인가 T3"
+                },
+                "properties": [
+                  {
+                    "id": "color",
+                    "value": {
+                      "mode": "fixed",
+                      "fixedColor": "#C0392B"
+                    }
+                  },
+                  {
+                    "id": "custom.lineStyle",
+                    "value": {
+                      "fill": "dash",
+                      "dash": [
+                        8,
+                        4
+                      ]
+                    }
+                  }
+                ]
+              }
+            ]
+          },
+          "options": {
+            "legend": {
+              "showLegend": true,
+              "displayMode": "table",
+              "placement": "bottom",
+              "calcs": [
+                "max",
+                "mean"
+              ]
+            },
+            "tooltip": {
+              "mode": "multi",
+              "sort": "none"
+            }
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "prometheus"
+              },
+              "expr": "max by(tier)(rate(tekton_queue_webhook_queued_total{tier=\"1\"}[5m])) * 60",
+              "legendFormat": "도착 T1",
+              "refId": "A"
+            },
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "prometheus"
+              },
+              "expr": "max by(tier)(rate(tekton_queue_webhook_queued_total{tier=\"2\"}[5m])) * 60",
+              "legendFormat": "도착 T2",
+              "refId": "B"
+            },
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "prometheus"
+              },
+              "expr": "max by(tier)(rate(tekton_queue_webhook_queued_total{tier=\"3\"}[5m])) * 60",
+              "legendFormat": "도착 T3",
+              "refId": "C"
+            },
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "prometheus"
+              },
+              "expr": "max by(tier)(rate(tekton_queue_scheduled_total{tier=\"1\"}[5m])) * 60",
+              "legendFormat": "인가 T1",
+              "refId": "D"
+            },
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "prometheus"
+              },
+              "expr": "max by(tier)(rate(tekton_queue_scheduled_total{tier=\"2\"}[5m])) * 60",
+              "legendFormat": "인가 T2",
+              "refId": "E"
+            },
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "prometheus"
+              },
+              "expr": "max by(tier)(rate(tekton_queue_scheduled_total{tier=\"3\"}[5m])) * 60",
+              "legendFormat": "인가 T3",
+              "refId": "F"
+            }
+          ]
+        },
+        {
+          "id": 5,
+          "type": "timeseries",
+          "title": "노드 CPU 사용률",
+          "description": "빌드 노드별 CPU. 실측에서 먼저 포화하는 자원이며 L_max 스윕 전 구간에서 92% 이상이었다.",
+          "gridPos": {
+            "h": 13,
+            "w": 12,
+            "x": 0,
+            "y": 26
+          },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "percentunit",
+              "decimals": 1,
+              "min": 0,
+              "custom": {
+                "lineWidth": 2,
+                "fillOpacity": 8,
+                "showPoints": "never",
+                "spanNulls": false,
+                "axisSoftMax": 1
+              }
+            },
+            "overrides": []
+          },
+          "options": {
+            "legend": {
+              "showLegend": true,
+              "displayMode": "table",
+              "placement": "bottom",
+              "calcs": [
+                "max",
+                "mean"
+              ]
+            },
+            "tooltip": {
+              "mode": "multi",
+              "sort": "none"
+            }
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "prometheus"
+              },
+              "expr": "label_replace(1 - avg by(instance)(rate(node_cpu_seconds_total{mode=\"idle\"}[5m])), \"node\", \"$1\", \"instance\", \"(.*):.*\")",
+              "legendFormat": "{{node}}",
+              "refId": "A"
+            }
+          ]
+        },
+        {
+          "id": 6,
+          "type": "timeseries",
+          "title": "노드 메모리 사용률",
+          "description": "노드별 메모리. 지속값과 순간 스파이크를 구분해 읽을 것 — 요약 JSON 의 peak 는 순간값이다.",
+          "gridPos": {
+            "h": 13,
+            "w": 12,
+            "x": 12,
+            "y": 26
+          },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "percentunit",
+              "decimals": 1,
+              "min": 0,
+              "custom": {
+                "lineWidth": 2,
+                "fillOpacity": 8,
+                "showPoints": "never",
+                "spanNulls": false,
+                "axisSoftMax": 1
+              }
+            },
+            "overrides": []
+          },
+          "options": {
+            "legend": {
+              "showLegend": true,
+              "displayMode": "table",
+              "placement": "bottom",
+              "calcs": [
+                "max",
+                "mean"
+              ]
+            },
+            "tooltip": {
+              "mode": "multi",
+              "sort": "none"
+            }
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "prometheus"
+              },
+              "expr": "label_replace(1 - (node_memory_MemAvailable_bytes / node_memory_MemTotal_bytes), \"node\", \"$1\", \"instance\", \"(.*):.*\")",
+              "legendFormat": "{{node}}",
+              "refId": "A"
+            }
+          ]
+        },
+        {
+          "id": 7,
+          "type": "timeseries",
+          "title": "네임스페이스 동시 실행 파드 (default-cicd)",
+          "description": "파이프라인런 한 건이 여러 파드를 만든다. 파드 계층 비교군(Volcano)과의 대조점이 이 패널이다.",
+          "gridPos": {
+            "h": 9,
+            "w": 12,
+            "x": 0,
+            "y": 39
+          },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "short",
+              "decimals": 0,
+              "min": 0,
+              "custom": {
+                "lineWidth": 2,
+                "fillOpacity": 18,
+                "showPoints": "never",
+                "spanNulls": false
+              }
+            },
+            "overrides": [
+              {
+                "matcher": {
+                  "id": "byName",
+                  "options": "Running"
+                },
+                "properties": [
+                  {
+                    "id": "color",
+                    "value": {
+                      "mode": "fixed",
+                      "fixedColor": "blue"
+                    }
+                  }
+                ]
+              },
+              {
+                "matcher": {
+                  "id": "byName",
+                  "options": "Pending"
+                },
+                "properties": [
+                  {
+                    "id": "color",
+                    "value": {
+                      "mode": "fixed",
+                      "fixedColor": "orange"
+                    }
+                  }
+                ]
+              }
+            ]
+          },
+          "options": {
+            "legend": {
+              "showLegend": true,
+              "displayMode": "table",
+              "placement": "bottom",
+              "calcs": [
+                "max",
+                "mean"
+              ]
+            },
+            "tooltip": {
+              "mode": "multi",
+              "sort": "none"
+            }
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "prometheus"
+              },
+              "expr": "sum(kube_pod_status_phase{namespace=\"default-cicd\",phase=\"Running\"})",
+              "legendFormat": "Running",
+              "refId": "A"
+            },
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "prometheus"
+              },
+              "expr": "sum(kube_pod_status_phase{namespace=\"default-cicd\",phase=\"Pending\"})",
+              "legendFormat": "Pending",
+              "refId": "B"
+            }
+          ]
+        },
+        {
+          "id": 8,
+          "type": "timeseries",
+          "title": "네임스페이스 파드 메모리 합 (default-cicd)",
+          "description": "워킹셋 기준. L_max 산정의 근거가 된 지표와 같은 계열이다.",
+          "gridPos": {
+            "h": 9,
+            "w": 12,
+            "x": 12,
+            "y": 39
+          },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "bytes",
+              "decimals": 1,
+              "min": 0,
+              "custom": {
+                "lineWidth": 2,
+                "fillOpacity": 18,
+                "showPoints": "never",
+                "spanNulls": false
+              }
+            },
+            "overrides": []
+          },
+          "options": {
+            "legend": {
+              "showLegend": true,
+              "displayMode": "table",
+              "placement": "bottom",
+              "calcs": [
+                "max",
+                "mean"
+              ]
+            },
+            "tooltip": {
+              "mode": "multi",
+              "sort": "none"
+            }
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "prometheus"
+              },
+              "expr": "sum(container_memory_working_set_bytes{namespace=\"default-cicd\"})",
+              "legendFormat": "워킹셋 합",
+              "refId": "A"
+            }
+          ]
+        },
+        {
+          "id": 9,
+          "type": "timeseries",
+          "title": "웹훅 /mutate 지연",
+          "description": "제어 계층 부하. rate 창이 10분이므로 측정 창 앞 10분은 직전 회차가 섞인다 — 앞부분은 읽지 말 것. 부하가 그치면 분위수가 정의되지 않아 선이 끊기는데 결측이 아니다.",
+          "gridPos": {
+            "h": 10,
+            "w": 12,
+            "x": 0,
+            "y": 48
+          },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "s",
+              "decimals": 3,
+              "min": 0,
+              "custom": {
+                "lineWidth": 2,
+                "fillOpacity": 8,
+                "showPoints": "never",
+                "spanNulls": false
+              }
+            },
+            "overrides": [
+              {
+                "matcher": {
+                  "id": "byName",
+                  "options": "p50"
+                },
+                "properties": [
+                  {
+                    "id": "color",
+                    "value": {
+                      "mode": "fixed",
+                      "fixedColor": "green"
+                    }
+                  }
+                ]
+              },
+              {
+                "matcher": {
+                  "id": "byName",
+                  "options": "p99"
+                },
+                "properties": [
+                  {
+                    "id": "color",
+                    "value": {
+                      "mode": "fixed",
+                      "fixedColor": "red"
+                    }
+                  }
+                ]
+              }
+            ]
+          },
+          "options": {
+            "legend": {
+              "showLegend": true,
+              "displayMode": "table",
+              "placement": "bottom",
+              "calcs": [
+                "max",
+                "mean"
+              ]
+            },
+            "tooltip": {
+              "mode": "multi",
+              "sort": "none"
+            }
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "prometheus"
+              },
+              "expr": "histogram_quantile(0.50, sum(rate(tekton_queue_webhook_latency_seconds_bucket[10m])) by (le))",
+              "legendFormat": "p50",
+              "refId": "A"
+            },
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "prometheus"
+              },
+              "expr": "histogram_quantile(0.99, sum(rate(tekton_queue_webhook_latency_seconds_bucket[10m])) by (le))",
+              "legendFormat": "p99",
+              "refId": "B"
+            }
+          ]
+        },
+        {
+          "id": 16,
+          "type": "timeseries",
+          "title": "제어 계층 처리율·오류 (건/분)",
+          "description": "웹훅 처리 건수와 K8s API 오류. 오류가 0 이 아니면 그 회차의 지표를 의심할 근거가 된다.",
+          "gridPos": {
+            "h": 10,
+            "w": 12,
+            "x": 12,
+            "y": 48
+          },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "short",
+              "decimals": 1,
+              "min": 0,
+              "custom": {
+                "lineWidth": 2,
+                "fillOpacity": 8,
+                "showPoints": "never",
+                "spanNulls": false
+              }
+            },
+            "overrides": [
+              {
+                "matcher": {
+                  "id": "byName",
+                  "options": "웹훅 처리"
+                },
+                "properties": [
+                  {
+                    "id": "color",
+                    "value": {
+                      "mode": "fixed",
+                      "fixedColor": "blue"
+                    }
+                  }
+                ]
+              },
+              {
+                "matcher": {
+                  "id": "byName",
+                  "options": "API 오류"
+                },
+                "properties": [
+                  {
+                    "id": "color",
+                    "value": {
+                      "mode": "fixed",
+                      "fixedColor": "red"
+                    }
+                  }
+                ]
+              }
+            ]
+          },
+          "options": {
+            "legend": {
+              "showLegend": true,
+              "displayMode": "table",
+              "placement": "bottom",
+              "calcs": [
+                "max",
+                "mean"
+              ]
+            },
+            "tooltip": {
+              "mode": "multi",
+              "sort": "none"
+            }
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "prometheus"
+              },
+              "expr": "max(rate(tekton_queue_webhook_latency_seconds_count[5m])) * 60",
+              "legendFormat": "웹훅 처리",
+              "refId": "A"
+            },
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "prometheus"
+              },
+              "expr": "(max(rate(tekton_queue_kubernetes_api_errors_total[5m])) or vector(0)) * 60",
+              "legendFormat": "API 오류",
+              "refId": "B"
+            }
+          ]
+        }
+      ]
+    }

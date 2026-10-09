@@ -1,0 +1,290 @@
+---
+# 파라미터 실측용 파이프라인 변형 (petclinic-build-measure)
+# 목적: 각 스테이지 컨테이너의 피크 메모리(cgroup memory.peak)를 캡처해 단일 PR 피크 메모리를 확정한다.
+#       → 논문 §3.3.1 L_max 도출식 입력 + requests(P95)/limits(피크×1.2) 산정 입력.
+#       측정 방법·근거: param_measurement.md §2.
+#
+# 원본(petclinic-build)과의 차이:
+#   1) 각 셸 스텝 말미에 memory.peak 를 읽어 "MEMPEAK stage=<name> bytes=<N>" 로 출력.
+#      (수집: common/mem_peak_collect.py 가 PipelineRun 파드 로그에서 파싱)
+#   2) 태스크는 순차 실행(runAfter)이며 각 Task = 별도 파드 → 스테이지 피크는 서로 독립.
+#      PR 피크 = 스테이지 피크의 최댓값(합 아님).
+#   3) 측정 중 OOM 방지를 위해 넉넉한 limit(param mem-limit, 기본 4Gi)을 적용. requests 는
+#      의도적으로 미설정(자연 워킹셋 피크를 관측하기 위함).
+#   4) Maven(JVM) 힙-limit 순환 의존 분리를 위해 java-opts(JAVA_TOOL_OPTIONS) 파라미터 제공.
+#      GKE 캘리브레이션 시 -Xmx 를 스윕해 최소 무결 힙을 찾는다(기본 "": MaxRAMPercentage 동작).
+#   5) kaniko 는 distroless(셸 없음) → :debug 이미지(busybox 셸)로 감싸 memory.peak 캡처.
+#
+# ※ 이 파이프라인은 계측 전용. 본실험/에이블레이션은 petclinic-build 를 사용한다.
+apiVersion: tekton.dev/v1
+kind: Pipeline
+metadata:
+  name: petclinic-build-measure
+  namespace: default-cicd
+spec:
+  description: |
+    파라미터 실측용 변형: 스테이지별 memory.peak 캡처(clone·maven·kaniko·trivy).
+  params:
+  - name: git-url
+    default: http://gitea-service.devops-tools.svc:3000/admin/spring-petclinic.git
+    type: string
+  - name: git-revision
+    default: main
+    type: string
+  - name: java-version
+    default: "17"
+    type: string
+  - name: env
+    default: dev
+    type: string
+  - name: image-tag
+    default: "latest"
+    type: string
+  - name: mem-limit
+    default: "4Gi"
+    type: string
+    description: "측정 중 OOM 방지용 넉넉한 메모리 limit. 자연 피크 관측 목적."
+  - name: java-opts
+    default: ""
+    type: string
+    description: "Maven JVM 옵션(JAVA_TOOL_OPTIONS). 예: '-Xmx1g'. 기본 빈 값=MaxRAMPercentage."
+  workspaces:
+  - name: shared-data
+  tasks:
+  # ── 1. 소스 클론 ──────────────────────────────────────────────────
+  - name: code-fetch
+    displayName: Code Fetch (measure)
+    taskSpec:
+      params:
+      - name: url
+      - name: revision
+        default: main
+      - name: mem-limit
+      workspaces:
+      - name: output
+      steps:
+      - name: clone
+        image: alpine/git:latest
+        # ※ 측정 중에는 limit 을 걸지 않는다. 컨테이너 limit 이 있으면 JVM 이 MaxRAMPercentage 를
+        #   그 값 기준으로 계산해 힙이 줄고, **캠페인(limit 없음)과 다른 워크로드를 재게 된다**
+        #   (2026-07-29 실측: limit 4Gi 에서 maven 481MiB vs limit 없음 648MiB).
+        #   실험 파이프라인(petclinic-build-experiment.yaml)도 computeResources 가 없다 — 조건을 맞춘다.
+        script: |
+          #!/bin/sh
+          set -e
+          git clone --depth 1 \
+            --branch $(params.revision) \
+            $(params.url) \
+            $(workspaces.output.path)/src
+          cd $(workspaces.output.path)/src
+          echo "Cloned $(params.url) @ $(git log -1 --pretty='%h %s')"
+          PEAK=$(cat /sys/fs/cgroup/memory.peak 2>/dev/null || cat /sys/fs/cgroup/memory/memory.max_usage_in_bytes 2>/dev/null || echo NA)
+          echo "MEMPEAK stage=clone bytes=${PEAK}"
+    params:
+    - name: url
+      value: $(params.git-url)
+    - name: revision
+      value: $(params.git-revision)
+    - name: mem-limit
+      value: $(params.mem-limit)
+    workspaces:
+    - name: output
+      workspace: shared-data
+  # ── 2. Maven 빌드 (JAR 패키지, 테스트 제외) ──────────────────────
+  - name: code-build
+    displayName: Code Build (measure)
+    runAfter: [code-fetch]
+    taskSpec:
+      params:
+      - name: java-version
+        default: "17"
+      - name: mem-limit
+      - name: java-opts
+      workspaces:
+      - name: source
+      results:
+      - name: jar-name
+        type: string
+      volumes:
+      - name: maven-settings
+        configMap:
+          name: maven-settings
+      steps:
+      - name: mvn-package
+        image: maven:3.9-eclipse-temurin-$(params.java-version)
+        workingDir: $(workspaces.source.path)/src
+        # ※ 측정 중에는 limit 을 걸지 않는다. 컨테이너 limit 이 있으면 JVM 이 MaxRAMPercentage 를
+        #   그 값 기준으로 계산해 힙이 줄고, **캠페인(limit 없음)과 다른 워크로드를 재게 된다**
+        #   (2026-07-29 실측: limit 4Gi 에서 maven 481MiB vs limit 없음 648MiB).
+        #   실험 파이프라인(petclinic-build-experiment.yaml)도 computeResources 가 없다 — 조건을 맞춘다.
+        env:
+        - name: JAVA_TOOL_OPTIONS
+          value: $(params.java-opts)
+        volumeMounts:
+        - name: maven-settings
+          mountPath: /etc/maven
+        script: |
+          #!/bin/bash
+          set -e
+          mvn package \
+            -B \
+            -s /etc/maven/settings.xml \
+            -DskipTests=true \
+            -Dmaven.repo.local=/tmp/.m2
+          JAR=$(find target -name "*.jar" -not -name "*sources*" | head -1)
+          echo "Built: $JAR"
+          echo -n "$(basename $JAR)" | tee $(results.jar-name.path)
+          PEAK=$(cat /sys/fs/cgroup/memory.peak 2>/dev/null || cat /sys/fs/cgroup/memory/memory.max_usage_in_bytes 2>/dev/null || echo NA)
+          echo "MEMPEAK stage=maven bytes=${PEAK}"
+    params:
+    - name: java-version
+      value: $(params.java-version)
+    - name: mem-limit
+      value: $(params.mem-limit)
+    - name: java-opts
+      value: $(params.java-opts)
+    workspaces:
+    - name: source
+      workspace: shared-data
+  # ── 3. Dockerfile 생성 ────────────────────────────────────────────
+  - name: write-dockerfile
+    displayName: Write Dockerfile
+    runAfter: [code-build]
+    taskSpec:
+      params:
+      - name: java-version
+        default: "17"
+      - name: jar-name
+      workspaces:
+      - name: source
+      steps:
+      - name: write
+        image: alpine:3.19
+        workingDir: $(workspaces.source.path)/src
+        script: |
+          #!/bin/sh
+          cat > Dockerfile <<EOF
+          FROM harbor.harbor.svc:80/library/eclipse-temurin:$(params.java-version)-jre-alpine
+          WORKDIR /app
+          COPY target/$(params.jar-name) app.jar
+          ENTRYPOINT ["java", "-jar", "app.jar"]
+          EOF
+          cat Dockerfile
+    params:
+    - name: java-version
+      value: $(params.java-version)
+    - name: jar-name
+      value: $(tasks.code-build.results.jar-name)
+    workspaces:
+    - name: source
+      workspace: shared-data
+  # ── 4. Kaniko 이미지 빌드 & Push (debug 이미지로 감싸 memory.peak 캡처) ──
+  - name: image-build
+    displayName: Image Build & Push (measure)
+    runAfter: [write-dockerfile]
+    taskSpec:
+      params:
+      - name: image
+      - name: mem-limit
+      workspaces:
+      - name: source
+      steps:
+      - name: kaniko
+        image: gcr.io/kaniko-project/executor:v1.23.2-debug
+        # ※ 측정 중에는 limit 을 걸지 않는다. 컨테이너 limit 이 있으면 JVM 이 MaxRAMPercentage 를
+        #   그 값 기준으로 계산해 힙이 줄고, **캠페인(limit 없음)과 다른 워크로드를 재게 된다**
+        #   (2026-07-29 실측: limit 4Gi 에서 maven 481MiB vs limit 없음 648MiB).
+        #   실험 파이프라인(petclinic-build-experiment.yaml)도 computeResources 가 없다 — 조건을 맞춘다.
+        env:
+        - name: DOCKER_CONFIG
+          value: /kaniko/.docker
+        volumeMounts:
+        - name: docker-config
+          mountPath: /kaniko/.docker
+        script: |
+          #!/busybox/sh
+          set -e
+          /kaniko/executor \
+            --dockerfile=$(workspaces.source.path)/src/Dockerfile \
+            --context=$(workspaces.source.path)/src \
+            --destination=$(params.image) \
+            --skip-tls-verify \
+            --insecure \
+            --insecure-pull \
+            --compressed-caching=false \
+            --cache=false
+          PEAK=$(cat /sys/fs/cgroup/memory.peak 2>/dev/null || cat /sys/fs/cgroup/memory/memory.max_usage_in_bytes 2>/dev/null || echo NA)
+          echo "MEMPEAK stage=kaniko bytes=${PEAK}"
+      volumes:
+      - name: docker-config
+        projected:
+          sources:
+          - secret:
+              name: harbor-kaniko-config
+              items:
+              - key: config.json
+                path: config.json
+    params:
+    - name: image
+      value: harbor.harbor.svc:80/library/petclinic-$(params.env)-$(params.image-tag):build
+    - name: mem-limit
+      value: $(params.mem-limit)
+    workspaces:
+    - name: source
+      workspace: shared-data
+  # ── 5. Trivy 이미지 취약점 스캔 ───────────────────────────────────
+  - name: image-scan
+    displayName: Trivy Image Scan (measure)
+    runAfter: [image-build]
+    taskSpec:
+      params:
+      - name: image
+      - name: mem-limit
+      volumes:
+      - name: harbor-auth
+        projected:
+          sources:
+          - secret:
+              name: harbor-kaniko-config
+              items:
+              - key: config.json
+                path: config.json
+      steps:
+      - name: trivy-scan
+        image: aquasec/trivy:0.57.0
+        # ※ 측정 중에는 limit 을 걸지 않는다. 컨테이너 limit 이 있으면 JVM 이 MaxRAMPercentage 를
+        #   그 값 기준으로 계산해 힙이 줄고, **캠페인(limit 없음)과 다른 워크로드를 재게 된다**
+        #   (2026-07-29 실측: limit 4Gi 에서 maven 481MiB vs limit 없음 648MiB).
+        #   실험 파이프라인(petclinic-build-experiment.yaml)도 computeResources 가 없다 — 조건을 맞춘다.
+        env:
+        - name: TRIVY_DB_REPOSITORY
+          value: harbor.harbor.svc:80/library/trivy-db:2
+        - name: TRIVY_JAVA_DB_REPOSITORY
+          value: harbor.harbor.svc:80/library/trivy-java-db:1
+        - name: DOCKER_CONFIG
+          value: /harbor-auth
+        volumeMounts:
+        - name: harbor-auth
+          mountPath: /harbor-auth
+        script: |
+          #!/bin/sh
+          set -e
+          echo "Trivy 이미지 스캔: $(params.image)"
+          trivy image \
+            --exit-code 0 \
+            --severity HIGH,CRITICAL \
+            --scanners vuln \
+            --insecure \
+            --timeout 10m \
+            $(params.image)
+          echo "스캔 완료"
+          PEAK=$(cat /sys/fs/cgroup/memory.peak 2>/dev/null || cat /sys/fs/cgroup/memory/memory.max_usage_in_bytes 2>/dev/null || echo NA)
+          echo "MEMPEAK stage=trivy bytes=${PEAK}"
+    params:
+    - name: image
+      value: harbor.harbor.svc:80/library/petclinic-$(params.env)-$(params.image-tag):build
+    - name: mem-limit
+      value: $(params.mem-limit)
+    workspaces:
+    - name: source
+      workspace: shared-data

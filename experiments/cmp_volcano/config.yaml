@@ -1,0 +1,25 @@
+# 비교군: Volcano (파드 스케줄링 계층)
+# 매트릭스(HANDOVER §5): S1·S2 × N3 (학위논문 확장).
+# 목적: 제어 계층이 다를 때(파드 스케줄링) 나타나는 파이프라인런 완결성 문제(부분 실행) 관찰.
+#
+# 전제(환경 구성, comparison_setup.md):
+#   - Tekton v1.9.2 + Volcano v1.15.0 설치됨.
+#   - Volcano 큐 default capability cpu=3 (= 30 x 100m) → 내 L_max=30 과 유사한 동시성.
+# 실행 시:
+#   - 내 컨트롤러 비활성 + tekton-kueue 웹훅 비활성(둘 다 가로채지 않게) → Volcano 만 게이팅.
+#   - PR 파드에 schedulerName=volcano 주입(pr_create --scheduler-name volcano).
+#   - cpu 요청량 파이프라인 변형(petclinic-build-volcano, step cpu=100m) 사용.
+#
+# 관찰 포인트(PoC 실증): 초과분은 PipelineRun 이 시작된 채(startTime O) 파드만 Pending
+#   → 타임아웃 시계 작동 + PVC 점유 + 부분 실행 위험. (tekton-kueue/내 컨트롤러는 PipelineRunPending 미시작.)
+
+scenario: cmp_volcano
+namespace: default-cicd
+gating: volcano
+queue_capability_cpu: 3          # = 30 x 100m (동시성 상한 근사)
+pod_cpu_request: 100m            # 제어 노브(petclinic-build-volcano)
+scenarios: [s1, s2]              # 각 N3
+pipeline: petclinic-build-volcano
+scheduler_name: volcano
+load: generateName
+destructive: false

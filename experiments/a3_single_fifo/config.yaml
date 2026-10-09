@@ -1,0 +1,29 @@
+# A3 — 단일 FIFO (Tier 구분 제거)
+# 목적: 우선순위 Tier 차등을 제거하고 단일 FIFO로 동작시켜, 다계층 Tier의 기여를 분리 검증한다.
+#       모든 파이프라인런을 동일 Tier(1)로 매핑 → 유효 Tier 차등 소멸 → enqueue_time 순 FIFO.
+#       agingMinTier=1 이므로 전부 이미 Tier 1 → 에이징도 순서에 영향 없음(순수 FIFO).
+#
+# 제어 방식: CRD spec(tierRules) 패치만으로 수행 — 코드 수정 없음(CLAUDE.md 컨벤션: CRD 우선).
+#   실험:  tierRules = [{tier:1, matchType:env, pattern:"*"}]  → 전 env(prod/stg/dev)·urgent 포함 Tier 1.
+#   원복:  canonical 4규칙(install/limit-setting.yaml)로 복원. maxPipelines 등 다른 필드는 건드리지 않음.
+#
+# 부하: S3(우선순위 검증)과 동일한 혼합 env 정상부하를 인가한다. S3(Tier 차등 有)와의 대비로
+#       Tier 제거 시 우선순위 차등이 사라짐을 관찰한다.
+# ※ 비파괴 조건. generateName 통일(운영 정합).
+
+scenario: a3_single_fifo
+namespace: default-cicd
+
+lmax: 30                          # 상한 유지
+tier_rules_experiment:            # 실험 조건 — run.sh 가 CRD 패치
+  - {tier: 1, matchType: env, pattern: "*"}
+
+load:
+  mode: steady
+  rate_per_min: 3                 # S3 와 동일 (ρ≈0.3, 안정 조건 + 큐 압력)
+  duration_min: 30
+  arrival: poisson
+  env_dist: default               # prod:0.1 / stg:0.2 / dev:0.7 (혼합 → Tier 차등이 원래라면 발생)
+  generate_name: true
+
+destructive: false
