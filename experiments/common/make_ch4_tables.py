@@ -482,17 +482,27 @@ def main():
     w("")
 
     w("\n## 표 4-7. 자원 안정성 종합\n")
-    w("| 조건 | OOMKilled | 축출 | 노드 Ready=Unknown 지속 |")
+    # 컨트롤러 적용 51회(D-W 36 + D-L 15)와 미적용 6회를 모두 센다. 비교군은 제외.
+    w("| 조건 | OOMKilled | 축출 | 노드 Ready≠true 지속 |")
     w("|---|---|---|---|")
+    GROUPS = (
+        ("컨트롤러 적용 — D-W (36회)", ("S0", "S1", "S2", "S3", "A2", "A3", "LMAX18", "LMAX24")),
+        ("컨트롤러 적용 — D-L (15회)", ("S0-NEW", "S1-NEW", "S3-NEW", "TA150", "TA600")),
+        ("A0-R (미적용, 3회)", ("A0-R",)),
+        ("A0-NR (미적용 + requests 무설정, 3회)", ("A0-NR",)),
+    )
     tot_oom = tot_ev = tot_nr = 0
-    for k in ("S0", "S1", "S2", "S3", "A2", "A3", "A0-R", "A0-NR"):
-        d = S[k]
-        tot_oom += d["oom"]; tot_ev += d["evict"]; tot_nr += d["notready_sec"]
-        w(f"| {k} | {d['oom']:.0f} | {d['evict']:.0f} | {d['notready_sec']:.0f}초 |")
+    for lab, keys in GROUPS:
+        oom = sum(S[k]["oom"] for k in keys)
+        ev = sum(S[k]["evict"] for k in keys)
+        nr = sum(S[k]["notready_sec"] for k in keys)
+        tot_oom += oom; tot_ev += ev; tot_nr += nr
+        w(f"| {lab} | {oom:.0f} | {ev:.0f} | {nr:.0f}초 |")
     w(f"| **합계** | **{tot_oom:.0f}** | **{tot_ev:.0f}** | **{tot_nr:.0f}초** |")
-    w("\n> 노드 상태 전이는 모두 `Ready=Unknown`(상태 갱신 미도달)이며 `Ready=false` 는 없었다.")
-    w("> kubelet 이 응답 불능이었던 경우는 **컨트롤러를 적용하지 않은 조건에서만** 관측됐다.")
-    w("> 자원 압박 조건(MemoryPressure·DiskPressure·PIDPressure)은 전 사례에서 관측되지 않았다.\n")
+    w("\n> 수집 지표는 `kube_node_status_condition{condition=\"Ready\",status=\"true\"}` 한 시리즈뿐이므로,")
+    w("> 전이가 `Ready=False` 였는지 `Unknown`(상태 보고 두절)이었는지는 **가르지 못한다** — 단정하지 말 것.")
+    w("> 축출 1건(A0-NR run3)의 사유는 `failures.log` 의 kubelet 메시지로 확인된다 — 노드 메모리 임계(100Mi) 미달,")
+    w("> 요청량 0 인 Maven 단계(약 620MiB) 축출. MemoryPressure 등 노드 압박 조건은 **시계열로 수집하지 않았다.**\n")
 
     w("\n## 표 4-8. 에이징 유무로 묶어 본 Tier 대기 — 귀속 확인\n")
     w("> 조건을 **에이징 유무**로 묶으면 서로 다른 두 구현이 같은 편에 선다.")
