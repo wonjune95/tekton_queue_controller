@@ -7,13 +7,19 @@ HANDOVER «4장 집필 작업 목록» 규칙을 코드로 옮긴 것이다.
   · ⑥ 처리량 우위를 주장하지 않는다 — 3자 비교에 유의성 판정을 함께 낸다.
   · 동시 실행은 **엄격 계수**(같은 시각의 종료를 시작보다 먼저 처리)한다.
     초 단위 타임스탬프 탓에 느슨 계수는 상한을 넘은 것처럼 보인다.
-  · 제외: A1·V(최종 설계에 없는 부품의 에이블레이션).
+  · 제외: V(최종 설계에 없는 부품의 검증). A1(카운터를 끈 D-W0)은 요인 실험 4번째 셀로만 쓴다.
+  · 노드 메모리는 빌드 노드 3대(회차 CPU 피크 상위 3대)로 집계하고, 대표값은 첫 생성 이후
+    2분 이동 평균의 최대값으로 한다(30초 단발 스파이크가 순간 최대를 정하는 회차가 있다). 다섯 노드 최대값은
+    빌드가 실행되지 않는 노드가 정하는 회차가 있다.
 
-⚠️ **검정은 짝지은 부호뒤집기 순열검정을 쓴다** (2026-08-05 정정).
-세 시스템은 **같은 시드로 같은 도착열**을 받았다(S1 인가 건수 117·106·107·111·92 가 양쪽 일치).
-짝짓지 않은 검정을 쓰면 회차 간 도착 변동이 잡음으로 들어가 p 가 왜곡된다.
-도달 가능한 최소 p 는 n=5 에서 1/16=0.0625, n=3 에서 1/4=0.25 이므로
-**n=3 비교에서는 유의성을 주장할 수 없고 방향의 일관성만 서술한다.**
+⚠️ **검정은 부하 형태에 따라 둘로 나뉜다** (논문 4.3.6절과 같은 규칙).
+  · 푸아송 도착(S1·S3·A2·T_a 등): 같은 시드는 같은 도착열을 받으므로(S1 인가 건수
+    117·106·107·111·92 가 양쪽 일치) **짝지은 부호뒤집기 순열검정**(`paired_test`)을 쓴다.
+    도달 가능한 최소 p 는 n=5 에서 0.0625, n=3 에서 0.25 이므로 유의성이 아니라
+    **방향 일치(k/n)** 로 서술한다.
+  · 고정 간격 버스트(S2, L_max 스윕, 요인 실험): 모든 회차가 **같은 도착열**을 받아
+    회차 번호로 짝지을 근거가 없다. **짝짓지 않고**(`unpaired_test`) 모든 회차 쌍 가운데
+    한쪽이 큰 쌍의 수(동률 포함)와 평균 차를 통계량으로 한 정확 순열검정의 p 를 보고한다.
 
 시드 대응 (짝지으려면 반드시 맞출 것):
   · 시드 1~5 조 = S1 run1~5(구) · A2 run1~5 · C-K 기본 s1_run1~5
@@ -30,7 +36,7 @@ import os
 import statistics as st
 import sys
 from collections import Counter, defaultdict
-from datetime import datetime
+from datetime import datetime, timedelta
 
 if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8")
@@ -93,10 +99,26 @@ def strict_concurrency(rows):
     return m
 
 
+def mavg_max(mem_ts, nodes, t0, width=120, min_pts=8):
+    """노드별 2분 이동 평균의 최대값(%) — 첫 생성(t0) 이후 표본만 쓴다.
+
+    실제 수집 간격은 30초이고 조회 격자는 15초이므로 2분 창에는 표본이 최대 8개 든다.
+    2분 창을 다 채운(표본 8개) 시점만 쓴다 — 계열 앞부분의 짧은 창이 단발 스파이크를 대표값으로 만드는 것을 막는다.
+    """
+    best = 0.0
+    for b in nodes:
+        pts = sorted((t, v) for t, v in mem_ts.get(b, []) if t0 is None or t >= t0)
+        for tj, _ in pts:
+            win = [v for t, v in pts if tj - timedelta(seconds=width) < t <= tj]
+            if len(win) >= min_pts:
+                best = max(best, 100 * sum(win) / len(win))
+    return best
+
+
 def summarize(files):
     """회차 목록 → 집계. 회차별 값을 모아 중앙값으로 대표한다."""
-    out = {k: [] for k in ("n", "succ", "fail", "unfin", "conc", "wait", "pods", "cpu", "mem")}
-    oom = ev = nr = 0
+    out = {k: [] for k in ("n", "succ", "fail", "unfin", "conc", "wait", "pods", "cpu", "mem", "bmem")}
+    oom = ev = nr = ntr = 0
     tier_med = defaultdict(list)
     tier_avg = defaultdict(list)
     tier_max = defaultdict(list)
@@ -140,16 +162,31 @@ def summarize(files):
         rc = f.replace(".csv", "_resource.csv")
         if os.path.exists(rc):
             per = defaultdict(list)
+            cpu_pk = defaultdict(float)
+            mem_ts = defaultdict(list)
             for r in csv.DictReader(open(rc, encoding="utf-8")):
-                if r.get("metric") == "node_ready":
+                m = r.get("metric")
+                if m == "node_ready":
                     per[r["label"]].append(float(r["value"]))
-            nr += sum(1 for v in per.values() for x in v if x < 1)
+                elif m == "node_cpu_util_ratio":
+                    cpu_pk[r["label"]] = max(cpu_pk[r["label"]], float(r["value"]))
+                elif m == "node_mem_util_ratio":
+                    mem_ts[r["label"]].append((ts(r["timestamp"]), float(r["value"])))
+            low = sum(1 for v in per.values() for x in v if x < 1)
+            nr += low
+            ntr += 1 if low else 0
+            # 빌드 노드 = 그 회차 CPU 피크 상위 3대
+            build = sorted(cpu_pk, key=lambda k: -cpu_pk[k])[:3]
+            if build:
+                created = [ts(r.get("created_at")) for r in rows]
+                t0 = min((c for c in created if c), default=None)
+                out["bmem"].append(mavg_max(mem_ts, build, t0))
     med = lambda a: st.median(a) if a else 0
     return dict(
         N=len(out["n"]), n=med(out["n"]), succ=med(out["succ"]), fail=med(out["fail"]),
         unfin=med(out["unfin"]), conc=max(out["conc"]) if out["conc"] else 0,
-        wait=med(out["wait"]), pods=med(out["pods"]), cpu=med(out["cpu"]), mem=med(out["mem"]),
-        oom=oom, evict=ev, notready_sec=nr * 15,
+        wait=med(out["wait"]), pods=med(out["pods"]), cpu=med(out["cpu"]), mem=med(out["mem"]), bmem=med(out["bmem"]),
+        oom=oom, evict=ev, notready_sec=nr * 15, ntr=ntr,
         tier_med={t: med(v) for t, v in tier_med.items()},
         tier_avg={t: med(v) for t, v in tier_avg.items()},
         tier_max={t: med(v) for t, v in tier_max.items()},
@@ -161,8 +198,7 @@ def summarize(files):
 def perm_test(a, b):
     """짝짓지 않은 정확 순열검정(양측). 반환: (평균차, p).
 
-    ⚠️ 본 캠페인 데이터에는 거의 쓰지 않는다 — 조건들이 같은 시드를 공유하므로
-    `paired_test` 가 옳다. 짝지을 수 없는 비교(회차 수가 다른 조건)에만 남겨 둔다.
+    버스트 조건(모든 회차가 같은 도착열)과 회차 수가 다른 비교에 쓴다. 쌍 계수는 `unpaired_test`.
     """
     if not a or not b:
         return 0.0, 1.0
@@ -177,6 +213,19 @@ def perm_test(a, b):
         if abs(st.mean(g1) - st.mean(g2)) >= abs(obs) - 1e-9:
             cnt += 1
     return obs, cnt / tot
+
+
+def unpaired_test(a, b):
+    """짝짓지 않은 비교. 반환: (평균차, p, a 가 큰 쌍, b 가 큰 쌍, 동률, 전체 쌍).
+
+    논문 4.3.6절 — 버스트 조건은 회차 번호로 짝지을 근거가 없으므로
+    모든 회차 쌍(len(a)×len(b)) 가운데 한쪽이 큰 쌍의 수와 정확 순열검정의 p 로 보고한다.
+    """
+    obs, p = perm_test(a, b)
+    gt = sum(1 for x in a for y in b if x > y + 1e-9)
+    lt = sum(1 for x in a for y in b if y > x + 1e-9)
+    tot = len(a) * len(b)
+    return obs, p, gt, lt, tot - gt - lt, tot
 
 
 def paired_test(a, b):
@@ -216,6 +265,9 @@ F = {
     "A0-R": [f"{R}/a0r_no_controller/run{i}.csv" for i in (1, 2, 3)],
     "A0-R-peak": [f"{R}/a0r_no_controller/run{i}_peak.csv" for i in (1, 2, 3)],
     "A0-NR": [f"{R}/a0nr_no_requests/run{i}.csv" for i in (1, 2, 3)],
+    # 요인 실험 4번째 셀 — 컨트롤러 적용(D-W0: 인가 카운터 끔) + requests 미설정.
+    #   파이프라인(petclinic-build)은 원자료에 남지 않는다 — 실행 스크립트 구성과 작업 기록에 근거.
+    "A1": [f"{R}/a1_counter_isolation/run{i}.csv" for i in (1, 2, 3)],
     "C-K-S1": [f"{R}/cmp_tekton_kueue/s1_run{i}.csv" for i in (1, 2, 3, 4, 5)],
     "C-K-S2": [f"{R}/cmp_tekton_kueue/s2_run{i}.csv" for i in (1, 2, 3, 4, 5)],
     "C-K-S3": [f"{R}/cmp_tekton_kueue/s3_run{i}.csv" for i in (1, 2, 3, 4, 5)],
@@ -265,9 +317,9 @@ def main():
     w("> 동시 실행은 **엄격 계수**다 — 같은 시각의 종료를 시작보다 먼저 처리한다.")
     w("> 초 단위 타임스탬프 탓에 느슨 계수는 상한을 넘은 것처럼 보인다(L_max=18 조건이 21 로 계수됨).")
     w("> **본문에 이 계수 규칙을 반드시 명시할 것.**\n")
-    w("> 제외: A1·V(최종 설계에 없는 부품의 에이블레이션).\n")
-    w("> 검정은 **짝지은 부호뒤집기 순열검정**이다. 최소 p 는 n=5 에서 0.0625, n=3 에서 0.25 이므로")
-    w("> **n=3 비교에서는 유의성을 주장하지 않고 방향 일치(k/n)로 서술한다.**\n")
+    w("> 제외: V(최종 설계에 없는 부품의 검증). A1(D-W0)은 요인 실험 4번째 셀로만 쓴다.\n")
+    w("> 검정은 푸아송 도착 조건에서 **짝지은 부호뒤집기 순열검정**(최소 p: n=5 0.0625, n=3 0.25 → 방향 일치 k/n 로 서술),")
+    w("> 버스트 조건(S2·L_max·요인 실험)에서 **짝짓지 않은 정확 순열검정 + 쌍 계수**다(논문 4.3.6절).\n")
 
     w("\n## 표 4-1. 시나리오별 결과\n")
     w("| 시나리오 | N | 부하 | 성공률 | 실패율 | 창 내 미완료 | 최대 동시 실행 | 대기 중앙 |")
@@ -294,19 +346,22 @@ def main():
                 continue
             w(f"| {sc} | {name} | {d['N']} | {d['succ']:.1f}% | {d['wait']:.0f}초 | {d['pods']:.0f} |")
     w("")
-    w("**처리량 검정 (짝지은 부호뒤집기 순열검정, 제안 vs tekton-kueue)**\n")
-    w("> 검정은 **회차 평균**으로 한다 — 위 표의 중앙값과 값이 다른 것은 통계량이 다르기 때문이다.")
-    w("> 같은 시드로 같은 도착열을 받았으므로 **회차끼리 짝지어** 검정한다.\n")
-    w("| 시나리오 | 제안(회차 평균) | tekton-kueue(회차 평균) | 차이 | 방향 일치 | p | 판정 |")
-    w("|---|---|---|---|---|---|---|")
+    w("**성공률 비교 (제안 vs tekton-kueue)**\n")
+    w("> 통계량은 **회차 평균**이다 — 위 표의 중앙값과 값이 다른 것은 통계량이 다르기 때문이다.")
+    w("> S1·S3(푸아송)은 같은 시드끼리 짝지은 부호뒤집기 순열검정, S2(버스트)는 짝짓지 않은 정확 순열검정과")
+    w("> 모든 회차 쌍 가운데 제안 쪽이 앞선 쌍의 수로 보고한다(논문 4.3.6절).\n")
+    w("| 시나리오 | 제안(회차 평균) | tekton-kueue(회차 평균) | 차이 | 방향 일치 / 쌍 계수 | p |")
+    w("|---|---|---|---|---|---|")
     for sc, a, b in (("S1", "S1", "C-K-S1"), ("S2", "S2", "C-K-S2"), ("S3", "S3", "C-K-S3")):
         x, y = succ_list(F[a]), succ_list(F[b])
-        d, p, k, n = paired_test(x, y)
-        verdict = "유의" if p < 0.05 else "유의하지 않음"
-        w(f"| {sc} | {st.mean(x):.1f}% | {st.mean(y):.1f}% | {d:+.1f}%p | {k}/{n} | {p:.3f} | {verdict} |")
-    w("\n> ⚠️ **처리량 우위를 주장하지 않는다.**")
-    w("> 짝지은 검정에서는 세 시나리오 모두 유의하지 않다. 유의차가 없다는 것은 **동등하다는 증거가 아니다**")
-    w("> — n=5 의 최소 p 가 0.0625 라 검정력이 낮을 뿐이므로, **«차이를 검출하지 못했다»** 까지만 쓴다.\n")
+        if sc == "S2":
+            d, p, gt, lt, tie, tot = unpaired_test(x, y)
+            agree = f"{tot}쌍 중 {gt}쌍" + (f"·동률 {tie}" if tie else "")
+        else:
+            d, p, k, n = paired_test(x, y)
+            agree = f"{k}/{n}"
+        w(f"| {sc} | {st.mean(x):.1f}% | {st.mean(y):.1f}% | {d:+.1f}%p | {agree} | {p:.3f} |")
+    w("\n> ⚠️ **처리량 우위를 주장하지 않는다.** 소표본이라 «유의» 판정을 쓰지 않고 방향 일치·쌍 계수와 p 를 함께 적는다.\n")
 
     w("\n## 표 4-3. Tier 별 대기 시간 (S1 포화 조건, 회차 중앙값의 중앙)\n")
     w("> ⚠️ **시드 조가 다른 행끼리 직접 빼지 말 것.** 짝지은 비교는 조 안에서만 성립한다.")
@@ -406,30 +461,32 @@ def main():
     d, p, k, n = paired_test(sb, sa)
     w(f"| 창내 성공률 | {st.mean(sa):.1f}% | {st.mean(sb):.1f}% | {k}/{n} | {p:.3f} | "
       f"{'유의' if p < 0.05 else '**유의하지 않음**'} |")
-    w("\n> ⚠️ H3 를 «최대 대기시간 감소»로 서술하면 유의하지 않다. **중앙값 기준으로 진술해야 한다.**")
+    w("\n> ⚠️ RQ3 를 «최대 대기시간 감소»로 서술하지 말 것(4/5). **중앙값·대기 몫 기준으로 진술한다.**")
     w("> 그리고 에이징은 Tier1 **최대** 대기를 크게 늘린다 — 이 상충을 함께 보고한다.")
-    w(f"> 처리량은 **깎이지 않는다** — 같은 구현 안에서 에이징을 켠 쪽이 {d:+.1f}%p 높고 방향이 {k}/{n} 일치한다.")
+    w(f"> 창내 성공률 차({d:+.1f}%p, {k}/{n})는 수행 블록 간 실행 속도·외부 실패와 분리되지 않는다 — "
+      "**에이징 효과로 서술하지 말 것**(논문 6.3절). 작업 보존 정렬은 종결 건수를 바꾸지 못한다.")
     w("> p=0.0625 는 n=5 짝지은 검정의 **도달 가능한 최솟값**이므로, 이보다 낮은 p 는 이 설계에서 나올 수 없다.\n")
 
     w("\n## 표 4-5. 요인 2×2 — 요구자원만으로 충분한가 (동일 부하: 고정 버스트 90건)\n")
-    w("| 조건 | N | 인가 건수 | 최대 동시 실행 | 최대 동시 파드 | 성공률 | OOM | 축출 |")
-    w("|---|---|---|---|---|---|---|---|")
-    for key, name in (("S2", "컨트롤러 ON + requests"),
-                      ("A0-R", "컨트롤러 OFF + requests"),
-                      ("A0-NR", "컨트롤러 OFF + requests 무설정")):
+    w("| 조건 | N | 인가 건수 | 최대 동시 실행 | 최대 동시 파드 | 성공률 | 실패율 | 미완료 | 빌드 노드 메모리 | 축출 |")
+    w("|---|---|---|---|---|---|---|---|---|---|")
+    for key, name in (("S2", "컨트롤러 O + requests O"),
+                      ("A1", "컨트롤러 O(D-W0) + requests X"),
+                      ("A0-R", "컨트롤러 X + requests O"),
+                      ("A0-NR", "컨트롤러 X + requests X")):
         d = S[key]
         w(f"| {name} | {d['N']} | {d['n']:.0f} | {d['conc']:.0f} | {d['pods']:.0f} | "
-          f"{d['succ']:.1f}% | {d['oom']:.0f} | {d['evict']:.0f} |")
-    w("\n※ **세 조건의 부하가 동일**하다(고정 버스트 90건) — 두 요인의 효과가 단계적으로 분리된다.")
-    w("※ 컨트롤러를 제거하면 동시 실행이 도착분 전체로 늘고 완료율이 절반 아래로 떨어진다.")
-    w("   자원 요청까지 없으면 동시 파드가 한 번 더 늘고 완료율이 추가로 낮아진다.")
+          f"{d['succ']:.1f}% | {d['fail']:.1f}% | {d['unfin']:.1f}% | {d['bmem']:.1f}% | {d['evict']:.0f} |")
+    w("\n※ **네 셀의 부하가 동일**하다(고정 버스트 90건). 컨트롤러 효과는 요청량 수준과 무관하게 같은 방향(3/3·3/3).")
     w("   → **자원 요청 설정만으로는 동시 실행 수가 통제되지 않는다.**")
-    w("※ OOMKilled 는 전 조건에서 관측되지 않았다. **«무제어 시 OOM» 은 주장할 수 없다.**")
+    w("※ 요청량 효과는 외부 실패(취약점 스캔)·수행 블록과 분리되지 않는다 — **보완 관계를 이 표의 결과로 서술하지 말 것**(논문 6.8·7.2절).")
+    w("※ 빌드 노드 메모리 = 빌드 노드 3대(회차 CPU 피크 상위 3대)의 첫 생성 이후 2분 이동 평균 최대값, 회차 중앙값.")
+    w("※ OOM 종료는 failures.log 종료 코드(137)로 판정한다 — 수집기 `oomkilled_total` 질의는 이 시계열에서 0만 낸다.")
     dp = S.get("A0-R-peak")
     if dp and dp["N"]:
         w(f"\n※ `a0r_no_controller` 에는 푸아송(S1형) 회차도 {dp['N']}회 있다"
           f"(인가 {dp['n']:.0f}건, 최대 동시 실행 {dp['conc']:.0f}, 성공률 {dp['succ']:.1f}%).")
-        w("   **부하 형태가 달라 위 표에 섞지 않는다.** 필요하면 S1 과 대조하는 별도 항목으로 쓴다.\n")
+        w("   **부하 형태가 달라 위 표에 섞지 않는다.** 논문은 같은 시드의 S1 과 짝지은 보조 비교로 쓴다(5.6절).\n")
 
     # ── 표 4-6. A3 — S3 와 짝지은 에이블레이션 ────────────────────────────
     # ⚠️ 반드시 env 기준으로 집계한다. A3 는 `tierRules` 를 «전 env → Tier 1» 로 패치하므로
@@ -481,28 +538,31 @@ def main():
       f"{S['A3']['succ']:.1f}%, 최대 동시 실행 {S['S3']['conc']:.0f} / {S['A3']['conc']:.0f}.")
     w("")
 
-    w("\n## 표 4-7. 자원 안정성 종합\n")
-    # 컨트롤러 적용 51회(D-W 36 + D-L 15)와 미적용 6회를 모두 센다. 비교군은 제외.
-    w("| 조건 | OOMKilled | 축출 | 노드 Ready≠true 지속 |")
-    w("|---|---|---|---|")
+    w("\n## 표 4-7. 자원 안정성 — 부하 형태 × 컨트롤러 (주 캠페인, 비교군 제외)\n")
+    w("| 부하 형태 | 컨트롤러 | 회차 | 전이 회차 | 노드 Ready≠true 지속 | 축출 |")
+    w("|---|---|---|---|---|---|")
     GROUPS = (
-        ("컨트롤러 적용 — D-W (36회)", ("S0", "S1", "S2", "S3", "A2", "A3", "LMAX18", "LMAX24")),
-        ("컨트롤러 적용 — D-L (15회)", ("S0-NEW", "S1-NEW", "S3-NEW", "TA150", "TA600")),
-        ("A0-R (미적용, 3회)", ("A0-R",)),
-        ("A0-NR (미적용 + requests 무설정, 3회)", ("A0-NR",)),
+        ("버스트(90건)", "적용", ("S2", "A1", "LMAX18", "LMAX24")),
+        ("버스트(90건)", "미적용", ("A0-R", "A0-NR")),
+        ("포화형(S1 부하)", "적용", ("S1", "S1-NEW", "A2", "TA150", "TA600")),
+        ("포화형(S1 부하)", "미적용", ("A0-R-peak",)),
+        ("안정(S3 부하)", "적용", ("S3", "S3-NEW", "A3")),
+        ("여유(S0)", "적용", ("S0", "S0-NEW")),
     )
-    tot_oom = tot_ev = tot_nr = 0
-    for lab, keys in GROUPS:
-        oom = sum(S[k]["oom"] for k in keys)
-        ev = sum(S[k]["evict"] for k in keys)
+    tot = [0, 0, 0, 0]
+    for load, ctl, keys in GROUPS:
+        n = sum(S[k]["N"] for k in keys)
+        ntr = sum(S[k]["ntr"] for k in keys)
         nr = sum(S[k]["notready_sec"] for k in keys)
-        tot_oom += oom; tot_ev += ev; tot_nr += nr
-        w(f"| {lab} | {oom:.0f} | {ev:.0f} | {nr:.0f}초 |")
-    w(f"| **합계** | **{tot_oom:.0f}** | **{tot_ev:.0f}** | **{tot_nr:.0f}초** |")
-    w("\n> 수집 지표는 `kube_node_status_condition{condition=\"Ready\",status=\"true\"}` 한 시리즈뿐이므로,")
+        ev = sum(S[k]["evict"] for k in keys)
+        tot = [tot[0] + n, tot[1] + ntr, tot[2] + nr, tot[3] + ev]
+        w(f"| {load} | {ctl} | {n} | {ntr} | {nr:.0f}초 | {ev:.0f} |")
+    w(f"| **합계** | | **{tot[0]}** | **{tot[1]}** | **{tot[2]:.0f}초** | **{tot[3]:.0f}** |")
+    w("\n> 수집 지표는 노드별 `kube_node_status_condition{condition=\"Ready\",status=\"true\"}` (1/0) 시계열이므로,")
     w("> 전이가 `Ready=False` 였는지 `Unknown`(상태 보고 두절)이었는지는 **가르지 못한다** — 단정하지 말 것.")
+    w("> 실제 스크레이프 간격은 30초다(값이 15초 표본 두 개마다 바뀜) — 지속 시간은 30초 단위로 읽는다.")
     w("> 축출 1건(A0-NR run3)의 사유는 `failures.log` 의 kubelet 메시지로 확인된다 — 노드 메모리 임계(100Mi) 미달,")
-    w("> 요청량 0 인 Maven 단계(약 620MiB) 축출. MemoryPressure 등 노드 압박 조건은 **시계열로 수집하지 않았다.**\n")
+    w("> 요청량 0 인 Maven 단계(620,820Ki ≈ 606MiB) 축출. MemoryPressure 등 노드 압박 조건은 **시계열로 수집하지 않았다.**\n")
 
     w("\n## 표 4-8. 에이징 유무로 묶어 본 Tier 대기 — 귀속 확인\n")
     w("> 조건을 **에이징 유무**로 묶으면 서로 다른 두 구현이 같은 편에 선다.")
@@ -613,7 +673,7 @@ def main():
         w(f"> 원자료 관측 폭이 {min(spans):.0f}~{max(spans):.0f}초로 갈린다. 보정 없이 세면")
         w("> 스윕 쪽이 300초를 더 소화한 만큼 완료율이 높게 나와 **없는 효과가 만들어진다.**")
         w(f"> 아래 완료율은 전 회차 공통 관측 폭 **{T:.0f}초**로 잘라 다시 센 값이다.\n")
-        w("| $L_{\\max}$ | N | 완료율(공통 창) | 대기 중앙 | 노드 CPU 최대 | 노드 메모리 최대 |")
+        w("| $L_{\\max}$ | N | 완료율(공통 창) | 대기 중앙 | 빌드 노드 CPU 최대 | 빌드 노드 메모리(2분 평균 최대) |")
         w("|---|---|---|---|---|---|")
         SUCC = {}
         for lab, key in LM:
@@ -621,19 +681,18 @@ def main():
             vals = [v for v in (succ_at(f, T) for f in F[key] if os.path.exists(f)) if v is not None]
             SUCC[lab] = vals
             w(f"| {lab} | {d['N']} | {st.median(vals):.1f}% | {d['wait']:.0f}초 "
-              f"| {d['cpu']:.1f}% | {d['mem']:.1f}% |")
-        w("\n**완료율 짝지은 검정 (같은 시드 1~5)**\n")
-        w("| 비교 | 차이 | 방향 일치 | p | 판정 |")
-        w("|---|---|---|---|---|")
+              f"| {d['cpu']:.1f}% | {d['bmem']:.1f}% |")
+        w("\n**완료율 비교 (버스트 조건 — 짝짓지 않은 정확 순열검정과 쌍 계수, 논문 4.3.6절)**\n")
+        w("| 비교 | 차이(회차 평균) | 앞선 쌍 | p |")
+        w("|---|---|---|---|")
         for a, b in (("24", "30"), ("18", "30"), ("24", "18")):
-            o, p, k, n = paired_test(SUCC[a], SUCC[b])
-            w(f"| L_max {a} vs {b} | {o:+.1f}%p | {k}/{n} | {p:.3f} | "
-              f"{'유의' if p < 0.05 else '유의하지 않음'} |")
-        w("\n※ **완료율에서는 세 수준 간 차이를 검출하지 못했다.**")
+            o, p, gt, lt, tie, tot = unpaired_test(SUCC[a], SUCC[b])
+            w(f"| L_max {a} vs {b} | {o:+.1f}%p | {tot}쌍 중 {gt}쌍" + (f"·동률 {tie}" if tie else "") + f" | {p:.3f} |")
+        w("\n※ **완료율은 상한을 올려도 높아지지 않았다** — 두 비교 모두 낮은 상한 쪽이 앞선 쌍이 많으나 p 는 0.1 이상이다.")
         w("   보정 전 원자료로는 $L_{\\max}$=24 가 30 보다 +12.4%p·5/5 로 앞서는 것처럼 보이나,")
         w("   그 차이는 위 쿨다운 300초에서 나온 것이며 공통 창으로 자르면 사라진다.")
-        w("※ 반면 **대기 시간은 단조 감소**하고 **노드 자원 사용률은 단조 증가**한다.")
-        w("   → $L_{\\max}$ 는 대기 시간과 자원 여유 사이를 조율하는 파라미터이며,")
+        w("※ 반면 **대기 시간은 단조 감소**하고 **빌드 노드 CPU 사용률은 단조 증가**한다(빌드 노드 메모리는 단조 아님).")
+        w("   → $L_{\\max}$ 는 대기 시간과 CPU 여유 사이를 조율하는 파라미터이며,")
         w("   측정한 구간 {18, 24, 30} 전체가 작동 구간이다. **최적값은 주장하지 않는다.**\n")
 
     out = args.out

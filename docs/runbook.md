@@ -40,7 +40,7 @@ kubectl logs -n tekton-pipelines <pod-name> --previous
 kubectl get lease tekton-queue-controller-leader -n tekton-pipelines -o yaml
 # holderIdentity 필드 확인 → 실제 실행 중인 Pod와 일치해야 함
 
-# 2. admitted ConfigMap 확인
+# 2. (이전 판 59c66bd 전용) admitted ConfigMap 확인 — 현행 단일 인가 구조에는 이 ConfigMap 이 없다
 kubectl get configmap tekton-queue-admitted-count -n tekton-pipelines -o yaml
 # 참고: admitted 누수는 Manager의 self-healing이 자동 보정한다.
 #   - running=0 인데 admitted>0  (또는)  pending 적체 & 슬롯=0 & admitted>0
@@ -128,7 +128,7 @@ kubectl rollout undo deployment/tekton-queue-controller -n tekton-pipelines
 | `tekton_queue_running_total` | 0 ~ limit | limit보다 큰 경우 카운터 버그 의심 |
 | `tekton_queue_pending_total` | 0 ~ N | 지속적으로 증가 시 Manager 루프 다운 의심 |
 | `tekton_queue_kubernetes_api_errors_total` | 0 | 급증 시 K8s API 서버 이상 또는 RBAC 문제 |
-| `tekton_queue_webhook_admitted_total` | 증가 | 멈춤 시 Webhook 비활성화 의심 |
+| `tekton_queue_webhook_admitted_total` | 0 (고정) | 구버전 지표 — 단일 인가 구조에서는 증가하지 않는다. 웹훅 동작은 `tekton_queue_webhook_queued_total` 로 본다 |
 
 ```bash
 # 메트릭 실시간 확인

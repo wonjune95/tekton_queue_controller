@@ -32,12 +32,10 @@ flowchart TB
 
     WT -- "watch/list" --> PR["PipelineRun"]
     MG -- "patch spec.status=null" --> PR
-    WH -- "admitted ±1" --> CM[("ConfigMap<br/>admitted cnt")]
-    MG -- "self-heal reset" --> CM
     LE -- "renew/acquire" --> LS[("Lease<br/>leader")]
 
     classDef store fill:#0969da,stroke:#0a5cc4,color:#fff;
-    class Cache,CM,LS store;
+    class Cache,LS store;
 ```
 
 ---
@@ -87,12 +85,15 @@ Tier 라벨 추가 → 즉시 실행 허용
 - Lease 이름: `tekton-queue-controller-leader` (기본값)
 - `LEASE_DURATION_SEC=15`, `LEASE_RETRY_PERIOD_SEC=2`
 - **리더만** Manager 루프(스케줄링)를 실행함
-- 리더 **탈취(takeover)** 시 `_reset_global_admitted()` 호출로 ConfigMap 카운터 초기화
-- 갱신 충돌(409)·탈취 충돌 발생 시 즉시 `is_leader=False` 로 내려 **이중 리더(dual-leader)** 구간을 제거
+- 갱신 충돌(409)·탈취 충돌 발생 시 즉시 `is_leader=False` 로 내려 **이중 리더(dual-leader)** 구간을 줄인다
+  (다른 오류로 갱신이 실패하는 구간, 노드 간 시계 차, API 호출이 멈추는 경우는 남는다 — README §14)
 
 ---
 
-## 5-1. admitted 카운터 & 자가 치유 (Self-healing)
+## 5-1. (이전 판) admitted 카운터 & 자가 치유 (Self-healing)
+
+> ⚠️ **이 절은 웹훅 판정 구성(이전 판, 커밋 59c66bd)의 설계다.** 현행 단일 인가 구조에서는 인가를 리더의
+> Manager 루프 한 곳에서만 하므로 이 카운터가 없다(README §12). 논문의 D-W 구성 서술을 위해 남겨 둔다.
 
 Webhook은 모든 Pod에서 동작하므로, cross-pod 쿼터 정합성을 위해 공용 ConfigMap `tekton-queue-admitted-count` 에 인플라이트 수를 기록한다.
 
@@ -158,7 +159,7 @@ config.py ◀─── metrics.py
 | `tekton_queue_limit` | Gauge | 설정된 최대 동시 실행 수 |
 | `tekton_queue_running_total` | Gauge | 현재 실행 중인 수 |
 | `tekton_queue_pending_total` | Gauge | Tier별 대기 중인 수 |
-| `tekton_queue_webhook_admitted_total` | Counter | Webhook에서 즉시 허용된 수 |
+| `tekton_queue_webhook_admitted_total` | Counter | (구버전 지표) 웹훅이 직접 인가하던 시절의 허용 수. 단일 인가 구조에서는 증가하지 않음 |
 | `tekton_queue_webhook_queued_total` | Counter | 쿼터 초과로 대기열 이동된 수 |
 | `tekton_queue_webhook_held_total` | Counter | Dashboard 외 출처로 보류된 수 |
 | `tekton_queue_scheduled_total` | Counter | Manager가 스케줄링한 수 |

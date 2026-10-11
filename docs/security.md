@@ -33,14 +33,12 @@ caBundle: "<위에서 추출한 base64 값>"
 
 | apiGroup | 리소스 | 동사 | 이유 |
 |----------|--------|------|------|
-| `tekton.dev` | `pipelineruns`, `pipelineruns/status` | get, list, watch, patch, update | 큐 관리 및 Pending/Running 전환 |
-| `tekton.devops` | `globallimits` | get, list, watch | CRD 설정 로드 |
-| `` (core) | `events`, `namespaces` | create, list, watch | 이벤트 기록, 네임스페이스 필터 |
-| `apiextensions.k8s.io` | `customresourcedefinitions` | get, list, watch | CRD 존재 확인 |
+| `tekton.dev` | `pipelineruns` | get, list, watch, patch | 캐시 구축(Watcher), 보류 해제(Manager) |
+| `tekton.devops` | `globallimits` | get | 상한 설정 로드 |
 | `coordination.k8s.io` | `leases` | get, create, update | Leader Election |
-| `` (core) | `configmaps` | get, create, update | HA admitted 카운터 |
 
-> **최소 권한 원칙**: 불필요한 `delete` 권한은 부여하지 않습니다. PipelineRun 삭제는 허용하지 않습니다.
+> **최소 권한 원칙**: `src/` 가 실제로 호출하는 API 만 둡니다. PipelineRun 생성·삭제 권한은 없습니다.
+> 웹훅 판정 구성(이전 판, 59c66bd)이 쓰던 ConfigMap 인가 카운터 권한은 단일 인가 구조에서 쓰지 않아 제거했습니다.
 
 ---
 

@@ -32,12 +32,15 @@ if [ "$PVC_COUNT" -gt 0 ]; then
   kubectl delete pvc --all -n "$NAMESPACE" --wait=false
 fi
 
-# 큐 컨트롤러 admitted count 리셋
+# 큐 컨트롤러 admitted 카운터 리셋 — 웹훅 판정 구성(D-W, 59c66bd)에만 있는 ConfigMap 이다.
+# 현행 단일 인가 구성(D-L)에는 이 ConfigMap 이 없어 명령은 조용히 무시된다.
+# ⚠️ 캠페인 당시에는 키를 `admitted_count` 로 잘못 적어 실제 키(`admitted`)가 초기화되지 않았고,
+#    D-W 카운터는 컨트롤러의 30초 자가 보정에 의존하였다(논문 4.3.2절). 2026-10-11 키를 바로잡았다.
 echo "[3/3] 큐 컨트롤러 상태 리셋..."
 kubectl patch configmap tekton-queue-admitted-count \
   -n tekton-pipelines \
   --type merge \
-  -p '{"data":{"admitted_count":"0"}}' 2>/dev/null || true
+  -p '{"data":{"admitted":"0"}}' 2>/dev/null || true
 
 # 빌드 노드 이미지 prune (백그라운드 실행 - 대기 없음)
 for NODE in $BUILD_NODE_NAMES; do

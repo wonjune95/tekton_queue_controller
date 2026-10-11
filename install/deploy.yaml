@@ -8,24 +8,21 @@ apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
   name: tekton-queue-controller-role
+# 최소 권한 — src/ 가 실제로 호출하는 API 만 둔다.
+#   watcher.py  : pipelineruns list/watch (클러스터 전역)
+#   manager.py  : pipelineruns patch (보류 해제)
+#   config.py   : globallimits get
+#   leader.py   : leases get(read)/create/update(replace)
+# (웹훅 판정 시절의 ConfigMap 인가 카운터와 PipelineRun 생성·삭제 권한은 단일 인가 구조에서 쓰지 않아 제거했다.)
 rules:
   - apiGroups: ["tekton.dev"]
-    resources: ["pipelineruns", "pipelineruns/status"]
-    verbs: ["list", "watch", "get", "patch", "update", "delete", "create"]
+    resources: ["pipelineruns"]
+    verbs: ["list", "watch", "get", "patch"]
   - apiGroups: ["tekton.devops"]
     resources: ["globallimits"]
-    verbs: ["list", "watch", "get"]
-  - apiGroups: [""]
-    resources: ["events", "namespaces"]
-    verbs: ["create", "list", "watch"]
-  - apiGroups: ["apiextensions.k8s.io"]
-    resources: ["customresourcedefinitions"]
-    verbs: ["list", "watch", "get"]
+    verbs: ["get"]
   - apiGroups: ["coordination.k8s.io"]
     resources: ["leases"]
-    verbs: ["get", "create", "update"]
-  - apiGroups: [""]
-    resources: ["configmaps"]
     verbs: ["get", "create", "update"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
