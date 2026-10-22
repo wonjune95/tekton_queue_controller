@@ -22,7 +22,7 @@ Tekton Pipelines에는 **클러스터 전역 동시 실행 제한이 없어**, �
 
 - **외부 락 스토리지 0** — Redis·ZooKeeper 없이 K8s 네이티브 프리미티브(Lease 기반 Leader Election)만으로 전역 쿼터 정합성을 확보. 인가 결정은 Leader의 매니저 루프 한 곳에서만 일어납니다
 - **비파괴적 제어 + 우선순위** — 삭제/재생성 없이 `PipelineRunPending` 주입으로 대기열에 넣고, 티어 + 에이징으로 스케줄링해 기아(starvation)를 방지
-- **HA** — Lease 기반 Leader Election으로 ~15초 내 Failover. 인가는 Leader의 Manager 루프에서만 일어나므로 Failover 중에도 중복 인가가 없습니다
+- **HA** — Lease 기반 Leader Election. 리더 장애 시 임차 기간(15초) 이상의 인가 공백 뒤 대기 인스턴스가 승격합니다(리더 파드 삭제 탐침 1회에서 18초). 인가는 리더의 Manager 루프에서만 일어나지만, 임차 갱신이 409 이외의 오류로 실패하는 구간에는 두 인스턴스가 함께 인가할 수 있습니다([§14 설계 한계](#14-설계-한계-및-향후-과제))
 - **검증됨** — 133개 단위 테스트 통과 + 실클러스터에서 동시 실행이 한도를 초과하지 않음(직렬·동시 도착 모두)
 
 > 왜 Go가 아니라 Python인지는 [§3 핵심 설계 결정](#-핵심-설계-결정-key-design-decisions)에서 다룹니다.
@@ -69,7 +69,7 @@ Tekton Pipelines는 클러스터 전체 단위의 동시 실행 개수를 제한
 | **우선순위 스케줄링** | CRD 기반 티어 분류 + 에이징(Aging) 메커니즘으로 기아(Starvation) 방지 |
 | **멀티 네임스페이스** | 복수 패턴 기반 네임스페이스 필터링 (fnmatch 문법) |
 | **고가용성 (HA)** | Kubernetes Lease 기반 Leader Election으로 다중 Pod 구성 지원 |
-| **API Server 부하 최소화** | SharedInformer 패턴의 로컬 인메모리 캐시 기반 Admission 판정 |
+| **API Server 부하 최소화** | SharedInformer 패턴의 로컬 인메모리 캐시로 실행 중 건수를 집계하고, 매니저 루프가 그 값으로 인가를 판정(웹훅은 판정하지 않음) |
 | **모니터링** | Prometheus 메트릭 노출 |
 
 ---
@@ -203,7 +203,7 @@ sequenceDiagram
 | **대기열 정합성** | `creationTimestamp` 기준 정렬 (FIFO) | Pod 재시작 시 순서 보장 |
 | **취소/중지 처리** | `Cancelled`, `CancelledRunFinally`, `StoppedRunFinally` 상태 감지 | 취소된 파이프라인의 슬롯 즉시 반환 |
 | **Race Condition 방어** | 인가 결정을 매니저 루프 한 곳으로 단일화 (Leader 전용) | 동시 CREATE 시에도 상한 초과 없음 |
-| **고가용성** | Kubernetes Lease 기반 Leader Election | Leader 장애 시 ~15초 내 자동 Failover |
+| **고가용성** | Kubernetes Lease 기반 Leader Election | Leader 장애 시 임차 만료(15초) 뒤 자동 승격(탐침 1회 18초) |
 
 ### 💡 핵심 설계 결정 (Key Design Decisions)
 
@@ -314,7 +314,7 @@ Kubernetes Lease 기반 Leader Election으로 **다중 Pod(replicas ≥ 2)** 구
 |---------|-----|------|
 | Lease Duration | 15초 | Lease 유효 기간 |
 | Retry Period | 2초 | Lease 체크/갱신 주기 |
-| 장애 복구 시간 | ~15초 | Leader 장애 시 Standby 승격까지 최대 시간 |
+| 장애 복구 시간 | 15초 이상 | 임차 만료 뒤 Standby 승격까지(탐침 1회 18초). 종료 시 임차를 반납하지 않아 하한이며, 이 동안 인가가 멈춥니다 |
 
 ```bash
 kubectl exec -n tekton-pipelines <pod-name> -- curl -sk https://localhost:8443/healthz
